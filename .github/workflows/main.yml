@@ -1,0 +1,35 @@
+name: Build Android ELF
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Build with ndk-build
+        run: |
+          ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./Android.mk \
+            NDK_APPLICATION_MK=./Application.mk
+
+      - name: Upload ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: AndroidSurfaceImguiEnhanced-arm64
+          path: libs/arm64-v8a/AndroidSurfaceImguiEnhanced
+          if-no-files-found: error
