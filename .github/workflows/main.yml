@@ -15,7 +15,6 @@ jobs:
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
-        id: setup-ndk
         with:
           ndk-version: r25c
           add-to-path: true
@@ -24,8 +23,8 @@ jobs:
         run: |
           ndk-build \
             NDK_PROJECT_PATH=. \
-            APP_BUILD_SCRIPT=./Android.mk \
-            NDK_APPLICATION_MK=./Application.mk
+            APP_BUILD_SCRIPT=./jni/Android.mk \
+            NDK_APPLICATION_MK=./jni/Application.mk
 
       - name: Upload ELF
         uses: actions/upload-artifact@v4
