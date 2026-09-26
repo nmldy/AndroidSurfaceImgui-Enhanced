@@ -13,19 +13,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Clean working tree
-        run: |
-          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name 'Qimgui-1.0.0.zip' ! -path './.github' -exec rm -rf {} +
-
-      - name: Unzip to temp
-        run: unzip -o Qimgui-1.0.0.zip -d /tmp/extract
-
-      - name: Drop zip's own workflows
-        run: rm -rf /tmp/extract/Qimgui-1.0.0/.github
+      - name: Unzip
+        run: unzip -o '*.zip' -d /tmp/extract
 
       - name: Move contents to repo root
         run: |
-          rsync -a /tmp/extract/Qimgui-1.0.0/ ./
+          rsync -a /tmp/extract/ ./
           rm -rf /tmp/extract
 
       - name: Commit and push
@@ -33,5 +26,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Extract Qimgui-1.0.0.zip to repo root" || echo "No changes"
+          git commit -m "Extract zip to repo root" || echo "No changes"
           git push
