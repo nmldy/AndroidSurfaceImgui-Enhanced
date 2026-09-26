@@ -1,43 +1,51 @@
-name: Unzip and Commit
+name: Build JNI (Enhanced)
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches: [ "Enhanced" ] # 当推送到 Enhanced 分支时自动触发
+  workflow_dispatch:         # 允许在 Actions 页面手动点击运行
 
 jobs:
-  unzip:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    # 1. 拉取代码（包含子模块）
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive' # 关键：确保第三方依赖（如 ImGui）被拉取
 
-      - name: Unzip
-        run: unzip -o '*.zip' -d /tmp/extract
+    # 2. 配置 Java 环境（虽然纯 C++，但 NDK 构建可能依赖）
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
-      - name: Flatten and move to repo root
-        run: |
-          echo "--- /tmp/extract ---"
-          ls -la /tmp/extract
-          # 若解压结果只有一个顶层文件夹，就进到它里面；否则直接用解压根
-          entries=$(ls -A /tmp/extract | wc -l)
-          first_dir=$(find /tmp/extract -mindepth 1 -maxdepth 1 -type d -print -quit)
-          if [ "$entries" -eq 1 ] && [ -n "$first_dir" ]; then
-            SRC="$first_dir"
-          else
-            SRC=/tmp/extract
-          fi
-          echo "Source: $SRC"
-          # 若 push 时报 workflow 权限 403，取消下一行注释（仅丢弃 zip 自带的 .github）
-          # rm -rf "$SRC/.github"
-          rsync -a "$SRC/" ./
-          rm -rf /tmp/extract
+    # 3. 安装指定版本的 NDK（README 要求 r21e 或更高，这里选 r25c）
+    - name: Setup Android NDK
+      uses: nttld/setup-ndk@v1
+      id: setup-ndk
+      with:
+        ndk-version: r25c
 
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Extract zip to repo root" || echo "No changes"
-          git push
+    # 4. 执行 ndk-build 编译
+    - name: Build with ndk-build
+      run: |
+        # 编译所有架构（如果 Application.mk 里配置了 APP_ABI）
+        ndk-build
+        # 如果你想只编译 arm64-v8a 加快速度，可以换成：
+        # ndk-build APP_ABI=arm64-v8a
+      env:
+        ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+
+    # 5. 上传编译产物（Artifacts）
+    - name: Upload libs
+      uses: actions/upload-artifact@v4
+      with:
+        name: compiled-libs
+        path: |
+          libs/
+          !libs/**/*.o  # 排除中间目标文件，只保留可执行文件和.so
