@@ -16,9 +16,22 @@ jobs:
       - name: Unzip
         run: unzip -o '*.zip' -d /tmp/extract
 
-      - name: Move contents to repo root
+      - name: Flatten and move to repo root
         run: |
-          rsync -a /tmp/extract/ ./
+          echo "--- /tmp/extract ---"
+          ls -la /tmp/extract
+          # 若解压结果只有一个顶层文件夹，就进到它里面；否则直接用解压根
+          entries=$(ls -A /tmp/extract | wc -l)
+          first_dir=$(find /tmp/extract -mindepth 1 -maxdepth 1 -type d -print -quit)
+          if [ "$entries" -eq 1 ] && [ -n "$first_dir" ]; then
+            SRC="$first_dir"
+          else
+            SRC=/tmp/extract
+          fi
+          echo "Source: $SRC"
+          # 若 push 时报 workflow 权限 403，取消下一行注释（仅丢弃 zip 自带的 .github）
+          # rm -rf "$SRC/.github"
+          rsync -a "$SRC/" ./
           rm -rf /tmp/extract
 
       - name: Commit and push
