@@ -31,6 +31,17 @@ bool OpenGLGraphics::Create() {
     m_EglSurface = eglCreateWindowSurface(m_EglDisplay, egl_config, m_Window, nullptr);
     eglMakeCurrent(m_EglDisplay, m_EglSurface, m_EglSurface, m_EglContext);
     glClearColor(0.0, 0.0, 0.0, 0.0);
+
+    // 创建时同步一次真实尺寸，避免首帧使用默认/过期尺寸导致裁剪
+    int width  = ANativeWindow_getWidth(m_Window);
+    int height = ANativeWindow_getHeight(m_Window);
+    if (width > 0 && height > 0) {
+        m_Width  = width;
+        m_Height = height;
+        m_LastWidth  = width;
+        m_LastHeight = height;
+        glViewport(0, 0, width, height);
+    }
     return true;
 }
 
@@ -39,6 +50,22 @@ void OpenGLGraphics::Setup() {
 }
 
 void OpenGLGraphics::PrepareFrame(bool resize) {
+    // 修复：之前此处直接丢弃 resize 参数，从不重新读取 ANativeWindow 尺寸，
+    // 导致基类 m_Width / m_Height（上游用于设置 ImGuiIO::DisplaySize）长期停留在旧值。
+    // 当 Surface 尺寸变化或与初始尺寸不一致时，ImGui 的投影矩阵 / 裁剪矩形会比真实屏幕小，
+    // 控件被拖动到“旧边界”之外（表现为屏幕下半部分）就会被直接裁掉。
+    int width  = ANativeWindow_getWidth(m_Window);
+    int height = ANativeWindow_getHeight(m_Window);
+    if (width > 0 && height > 0 &&
+        (resize || width != m_LastWidth || height != m_LastHeight ||
+         m_Width != width || m_Height != height)) {
+        m_LastWidth  = width;
+        m_LastHeight = height;
+        m_Width      = width;
+        m_Height     = height;
+        // 显式设置视口，保证 glClear 与 ImGui 渲染都覆盖整个 Surface
+        glViewport(0, 0, width, height);
+    }
     ImGui_ImplOpenGL3_NewFrame();
 }
 
