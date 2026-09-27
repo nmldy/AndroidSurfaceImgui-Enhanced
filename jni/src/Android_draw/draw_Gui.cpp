@@ -453,8 +453,6 @@ static void ApplyLiquidGlassLightStyle() {
 
 // =====================================================================
 //  按索引应用主题
-//  - save=true 时写入文件（只在用户主动切换时调用）
-//  - save=false 用于被动场景（重建 / 方向切换），不重复写盘
 // =====================================================================
 static void ApplyThemeByIndex(int idx, bool save = true) {
     if (idx < 0 || idx > 2) idx = 0;
@@ -488,7 +486,9 @@ static void ApplyThemeByIndex(int idx, bool save = true) {
 bool M_Android_LoadFont(float SizePixels) {
     ImGuiIO &io = ImGui::GetIO();
 
-    if (zh_font == nullptr || io.Fonts->Fonts.empty()) {
+    // 系统字体是否加载成功。注意：检查的是 ImGui::SystemFont，
+    // 因为 My_Android_LoadSystemFont() 里赋值的正是它（不是 zh_font）。
+    if (ImGui::SystemFont == nullptr || io.Fonts->Fonts.empty()) {
         return false;
     }
 
@@ -504,7 +504,7 @@ bool M_Android_LoadFont(float SizePixels) {
     ::icon_font_2 = io.Fonts->AddFontFromMemoryCompressedTTF((const void *)&font_awesome_solid_compressed_data, sizeof(font_awesome_solid_compressed_data), 0.0f, &icons_config, icons_ranges);
 
     io.Fonts->AddFontDefault();
-    return zh_font != nullptr;
+    return ImGui::SystemFont != nullptr;
 }
 
 void init_My_drawdata() {
@@ -580,7 +580,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // 音量键循环 toggle（快速连按也能正确响应）
     int volume_presses = __sync_lock_test_and_set(&g_volume_toggle_request, 0);
     while (volume_presses-- > 0) {
         g_ui_hidden = !g_ui_hidden;
@@ -621,7 +620,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
     static bool show_demo_window = false;
     static bool show_another_window = false;
 
-    // 缓存胶囊文本，避免每帧重建字符串
     static char capsule_buf[128] = {0};
     static float capsule_text_w = 0.0f;
 
@@ -656,9 +654,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
         float cur_x = ((float)native_window_screen_x - cur_size.x) * 0.5f;
         ImVec2 cur_pos = ImVec2(cur_x, pos_y);
 
-        // ============================================================
-        //  运动模糊残影
-        // ============================================================
+        // 运动模糊残影
         if (g_hide_progress > 0.05f && g_hide_progress < 0.95f) {
             ImDrawList *dl = ImGui::GetForegroundDrawList();
 
@@ -689,7 +685,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
                 );
             }
         }
-        // ============================================================
 
         float dyn_rounding = 22.0f + (cap_size.y * 0.5f - 22.0f) * shrink_t;
         ImVec2 dyn_padding(
@@ -713,12 +708,10 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImGuiWindowFlags_NoSavedSettings;
 
         if (!fully_expanded) {
-            // 动画中 / 已收起时不允许用户拖拽
             flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
         }
 
-        // 【优化】完全收起时窗口不响应任何输入，
-        // 避免触摸穿透到胶囊导致误触（展开只靠音量键）
+        // 完全收起时窗口不响应任何输入（触摸穿透）
         const bool fully_hidden = (g_ui_hidden && g_hide_progress > 0.99f);
         if (fully_hidden) {
             flags |= ImGuiWindowFlags_NoInputs;
@@ -803,9 +796,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
         } else {
             // ---------- 胶囊内容：单行摘要 ----------
-            // 【优化】重建一次缓存文本（宽度变化只与屏幕宽度相关，无需每帧算）
-            if (capsule_buf[0] == 0 ||
-                fabsf(capsule_text_w) < 0.01f) {
+            if (capsule_buf[0] == 0 || fabsf(capsule_text_w) < 0.01f) {
                 snprintf(capsule_buf, sizeof(capsule_buf), "%s   %s   %.0f FPS",
                          ICON_FA_MICROCHIP,
                          graphics->RenderName,
@@ -825,7 +816,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImVec2 win_pos = ImGui::GetWindowPos();
             ImVec2 win_size = ImGui::GetWindowSize();
 
-            // 保证至少 100px 可见，防止窗口被拖/缩到屏幕外"丢失"
             const float scr_w = (float)native_window_screen_x;
             const float scr_h = (float)native_window_screen_y;
             const float min_visible = 100.0f;
