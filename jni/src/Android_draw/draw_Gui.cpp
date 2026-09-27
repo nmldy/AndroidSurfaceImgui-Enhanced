@@ -8,6 +8,15 @@
    
 #include "My_icon/pic_ZhenAiKun_png.h"
 
+// ===== 音量键监听需要的头文件 =====
+#include <fcntl.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/ioctl.h>
+#include <linux/input.h>
+#include <vector>
+#include <cmath>
+
 bool permeate_record = false;
 bool permeate_record_ini = false;
 struct Last_ImRect LastCoordinate = {0, 0, 0, 0};
@@ -33,9 +42,6 @@ static bool g_need_reset_interaction = false;
 
 // =====================================================================
 //  UI 动画状态
-//  - alpha: 窗口淡入进度 0..1
-//  - colors_current / colors_target: 主题颜色平滑过渡
-//  全部为文件内 static，不对外暴露
 // =====================================================================
 struct GlassAnimState {
     float  alpha          = 0.0f;
@@ -46,64 +52,95 @@ struct GlassAnimState {
 };
 static GlassAnimState g_anim;
 
-// 把当前 style 里的颜色快照到 target（主题切换时调用）
-static void CaptureCurrentColorsAsTarget() {
-    ImGuiStyle &style = ImGui::GetStyle();
-    for (int i = 0; i < ImGuiCol_COUNT; ++i) {
-        g_anim.colors_target[i] = style.Colors[i];
+// =====================================================================
+//  音量键隐藏 / 展开 状态
+// =====================================================================
+static volatile int g_volume_toggle_request = 0;
+static bool         g_volume_thread_started = false;
+static bool         g_ui_hidden             = false;
+static float        g_hide_progress         = 0.0f;
+static float        g_expanded_pos_y        = -99999.0f;
+
+
+// =====================================================================
+//  计算收起后应该在屏幕顶部保留多少像素
+//  横竖屏自适应：按屏幕短边比例算，限制在 40 ~ 120 px
+// =====================================================================
+static float CalcPeekHeight() {
+    float short_side = (float)((native_window_screen_x < native_window_screen_y)
+                               ? native_window_screen_x
+                               : native_window_screen_y);
+    float h = short_side * 0.06f;
+    if (h < 40.0f)  h = 40.0f;
+    if (h > 120.0f) h = 120.0f;
+    return h;
+}
+
+
+// =====================================================================
+//  音量键监听线程
+// =====================================================================
+static void* VolumeKeyThread(void*) {
+    std::vector<int> fds;
+
+    for (int i = 0; i < 32; ++i) {
+        char path[64];
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+
+        int fd = open(path, O_RDONLY | O_NONBLOCK);
+        if (fd < 0) continue;
+
+        uint8_t keybit[(KEY_MAX / 8) + 1] = {0};
+        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) {
+            close(fd);
+            continue;
+        }
+
+        bool has_vol_up = keybit[KEY_VOLUMEUP   / 8] & (1 << (KEY_VOLUMEUP   % 8));
+        bool has_vol_dn = keybit[KEY_VOLUMEDOWN / 8] & (1 << (KEY_VOLUMEDOWN % 8));
+
+        if (has_vol_up || has_vol_dn) {
+            fds.push_back(fd);
+        } else {
+            close(fd);
+        }
     }
+
+    if (fds.empty()) return nullptr;
+
+    while (true) {
+        for (int fd : fds) {
+            struct input_event ev;
+            while (read(fd, &ev, sizeof(ev)) == (ssize_t) sizeof(ev)) {
+                if (ev.type == EV_KEY &&
+                    (ev.code == KEY_VOLUMEUP || ev.code == KEY_VOLUMEDOWN) &&
+                    ev.value == 1) {
+                    __sync_fetch_and_add(&g_volume_toggle_request, 1);
+                }
+            }
+        }
+        usleep(20000);
+    }
+    return nullptr;
 }
 
-// 重置淡入（重建 / 切换方向时调用）
-static void ResetGlassFadeIn() {
-    g_anim.alpha = 0.0f;
-    g_anim.colors_inited = false;   // 首次会直接吸附到目标色，避免黑屏渐变
-}
 
-// 每帧调用：颜色 lerp + alpha 递增
-static void UpdateGlassAnimation() {
+// =====================================================================
+//  隐藏 / 展开 动画更新
+// =====================================================================
+static void UpdateHideAnimation() {
     ImGuiIO &io = ImGui::GetIO();
     float dt = io.DeltaTime;
-    if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;   // 防止切换时大跳变
+    if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
 
-    // ---------- 1) 窗口淡入 ----------
-    if (g_anim.alpha < g_anim.target_alpha) {
-        // 1.5 秒左右收敛（speed = 0.7/s 起点慢，后面快）
-        const float speed = 0.7f + 0.5f * (1.0f - g_anim.alpha / g_anim.target_alpha);
-        g_anim.alpha += dt * speed;
-        if (g_anim.alpha > g_anim.target_alpha) g_anim.alpha = g_anim.target_alpha;
-    }
+    const float target = g_ui_hidden ? 1.0f : 0.0f;
+    const float k = 9.0f;
+    float t = 1.0f - expf(-k * dt);
+    if (t > 1.0f) t = 1.0f;
 
-    // ---------- 2) 主题颜色平滑过渡 ----------
-    if (!g_anim.colors_inited) {
-        // 首帧：直接吸附到目标，避免从黑渐变
-        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
-            g_anim.colors_current[i] = g_anim.colors_target[i];
-        }
-        g_anim.colors_inited = true;
-    } else {
-        // 用"指数逼近"做平滑，收敛速度与帧率无关
-        // t = 1 - exp(-k * dt)，k 越大越快
-        const float k = 9.0f;
-        float t = 1.0f - expf(-k * dt);
-        if (t > 1.0f) t = 1.0f;
-
-        ImGuiStyle &style = ImGui::GetStyle();
-        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
-            ImVec4 &cur       = g_anim.colors_current[i];
-            const ImVec4 &tgt = g_anim.colors_target[i];
-
-            cur.x += (tgt.x - cur.x) * t;
-            cur.y += (tgt.y - cur.y) * t;
-            cur.z += (tgt.z - cur.z) * t;
-            cur.w += (tgt.w - cur.w) * t;
-
-            style.Colors[i] = cur;
-        }
-    }
-
-    // ---------- 3) 应用全局 alpha ----------
-    ImGui::GetStyle().Alpha = g_anim.alpha;
+    g_hide_progress += (target - g_hide_progress) * t;
+    if (fabsf(g_hide_progress - target) < 0.0015f)
+        g_hide_progress = target;
 }
 
 
@@ -127,9 +164,59 @@ static void ResetMouseToNeutralPosition() {
 }
 
 
-// =====================================================================
-//  液态玻璃：公共形状与间距（先重置再缩放，幂等）
-// =====================================================================
+static void CaptureCurrentColorsAsTarget() {
+    ImGuiStyle &style = ImGui::GetStyle();
+    for (int i = 0; i < ImGuiCol_COUNT; ++i) {
+        g_anim.colors_target[i] = style.Colors[i];
+    }
+}
+
+
+static void ResetGlassFadeIn() {
+    g_anim.alpha = 0.0f;
+    g_anim.colors_inited = false;
+}
+
+
+static void UpdateGlassAnimation() {
+    ImGuiIO &io = ImGui::GetIO();
+    float dt = io.DeltaTime;
+    if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
+
+    if (g_anim.alpha < g_anim.target_alpha) {
+        const float speed = 0.7f + 0.5f * (1.0f - g_anim.alpha / g_anim.target_alpha);
+        g_anim.alpha += dt * speed;
+        if (g_anim.alpha > g_anim.target_alpha) g_anim.alpha = g_anim.target_alpha;
+    }
+
+    if (!g_anim.colors_inited) {
+        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
+            g_anim.colors_current[i] = g_anim.colors_target[i];
+        }
+        g_anim.colors_inited = true;
+    } else {
+        const float k = 9.0f;
+        float t = 1.0f - expf(-k * dt);
+        if (t > 1.0f) t = 1.0f;
+
+        ImGuiStyle &style = ImGui::GetStyle();
+        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
+            ImVec4 &cur       = g_anim.colors_current[i];
+            const ImVec4 &tgt = g_anim.colors_target[i];
+
+            cur.x += (tgt.x - cur.x) * t;
+            cur.y += (tgt.y - cur.y) * t;
+            cur.z += (tgt.z - cur.z) * t;
+            cur.w += (tgt.w - cur.w) * t;
+
+            style.Colors[i] = cur;
+        }
+    }
+
+    ImGui::GetStyle().Alpha = g_anim.alpha;
+}
+
+
 static void ApplyLiquidGlassShapeAndSpacing() {
     ImGuiStyle &style = ImGui::GetStyle();
     style = ImGuiStyle();
@@ -157,9 +244,6 @@ static void ApplyLiquidGlassShapeAndSpacing() {
 }
 
 
-// =====================================================================
-//  液态玻璃：深色配色
-// =====================================================================
 static void ApplyLiquidGlassDarkColors() {
     ImGuiStyle &style = ImGui::GetStyle();
     ImVec4 *c = style.Colors;
@@ -208,9 +292,6 @@ static void ApplyLiquidGlassDarkColors() {
 }
 
 
-// =====================================================================
-//  液态玻璃：亮色配色
-// =====================================================================
 static void ApplyLiquidGlassLightColors() {
     ImGuiStyle &style = ImGui::GetStyle();
     ImVec4 *c = style.Colors;
@@ -262,7 +343,7 @@ static void ApplyLiquidGlassLightColors() {
 static void ApplyLiquidGlassWindowStyle() {
     ApplyLiquidGlassShapeAndSpacing();
     ApplyLiquidGlassDarkColors();
-    CaptureCurrentColorsAsTarget();   // 记录目标色，用于平滑过渡
+    CaptureCurrentColorsAsTarget();
 }
 
 static void ApplyLiquidGlassLightStyle() {
@@ -297,11 +378,13 @@ void init_My_drawdata() {
 
     ::Aekun_image = graphics->LoadTextureFromMemory((void *)picture_ZhenAiKun_PNG_H, sizeof(picture_ZhenAiKun_PNG_H));
 
-    // 液态玻璃样式（默认深色）
     ApplyLiquidGlassWindowStyle();
-
-    // 首次构建/重建后都从透明淡入
     ResetGlassFadeIn();
+
+    // 重建时把隐藏状态复位，避免重建后卡在屏幕外
+    g_ui_hidden      = false;
+    g_hide_progress  = 0.0f;
+    g_expanded_pos_y = -99999.0f;
 }
 
 
@@ -320,7 +403,7 @@ void drawBegin() {
         android::ANativeWindowCreator::Destroy(::window);
         ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
         graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-        ::init_My_drawdata();   // 内部会 ResetGlassFadeIn()
+        ::init_My_drawdata();   // 内部会把隐藏状态复位
 
         g_window = NULL;
         ResetMouseToNeutralPosition();
@@ -336,15 +419,35 @@ void drawBegin() {
         ResetMouseToNeutralPosition();
         g_need_reset_interaction = true;
 
-        // 方向切换也播一次淡入
         ResetGlassFadeIn();
+
+        // ===== 关键：方向切换时把隐藏状态完全复位 =====
+        // 否则切到横屏后窗口会卡在屏幕外或第一帧跳到错误位置
+        g_ui_hidden      = false;
+        g_hide_progress  = 0.0f;
+        g_expanded_pos_y = -99999.0f;   // 下一帧 Begin 会重新记录展开位置
     }
 }
 
 
 void Layout_tick_UI(bool *main_thread_flag) {
-    // ===== 每帧驱动 UI 动画（颜色插值 + 淡入）=====
+    // ===== 启动音量键线程（只启动一次）=====
+    if (!g_volume_thread_started) {
+        g_volume_thread_started = true;
+        pthread_t t;
+        if (pthread_create(&t, nullptr, VolumeKeyThread, nullptr) == 0) {
+            pthread_detach(t);
+        }
+    }
+
+    // ===== 处理音量键触发：切换隐藏状态 =====
+    if (__sync_lock_test_and_set(&g_volume_toggle_request, 0) > 0) {
+        g_ui_hidden = !g_ui_hidden;
+    }
+
+    // ===== 每帧驱动动画 =====
     UpdateGlassAnimation();
+    UpdateHideAnimation();
 
     // 打断 ImGui 残留交互
     if (g_need_reset_interaction) {
@@ -368,6 +471,26 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
         ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag);
 
+        // ===== 记录 / 应用隐藏动画的窗口位置 =====
+        // 横竖屏通用：窗口始终"向屏幕顶部方向"滑出
+        {
+            ImVec2 cur_pos  = ImGui::GetWindowPos();
+            ImVec2 cur_size = ImGui::GetWindowSize();
+
+            if (g_expanded_pos_y < -90000.0f) {
+                g_expanded_pos_y = cur_pos.y;
+            }
+
+            if (g_hide_progress > 0.001f) {
+                const float peek  = CalcPeekHeight();      // 收起后露头高度，横竖屏自适应
+                const float offset = -(cur_size.y - peek) * g_hide_progress;
+                ImGui::SetWindowPos(ImVec2(cur_pos.x, g_expanded_pos_y + offset));
+            } else if (!g_ui_hidden) {
+                g_expanded_pos_y = cur_pos.y;
+            }
+        }
+        // ========================================
+
         if (::permeate_record_ini) {
             ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
             ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
@@ -378,6 +501,9 @@ void Layout_tick_UI(bool *main_thread_flag) {
         ImGui::TextDisabled(ICON_FA_MICROCHIP "  %s", graphics->RenderName);
         ImGui::SameLine();
         ImGui::TextDisabled("  ·  " ICON_FA_CODE "  %s", ImGui::GetVersion());
+        ImGui::SameLine();
+        ImGui::TextDisabled("  ·  " ICON_FA_MOBILE_ALT "  %s",
+                            (native_window_screen_x < native_window_screen_y) ? "竖屏" : "横屏");
         ImGui::Spacing();
 
         // ============= 分组 1：外观主题 =============
@@ -386,8 +512,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImGui::TextDisabled("整体视觉风格（切换带平滑过渡）");
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::Combo("##theme_combo", &style_idx, "深色主题\0亮色主题\0经典主题\0")) {
-                // 注意：调用 ApplyLiquidGlass* 时会 CaptureCurrentColorsAsTarget，
-                // 但当前 colors_current 仍是旧色，动画会从旧色平滑过渡到新色。
                 switch (style_idx) {
                     case 0: ApplyLiquidGlassWindowStyle(); break;
                     case 1: ApplyLiquidGlassLightStyle();  break;
@@ -445,6 +569,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
                                ICON_FA_TACHOMETER_ALT "  %.1f FPS   (%.3f ms/frame)",
                                ImGui::GetIO().Framerate,
                                1000.0f / ImGui::GetIO().Framerate);
+            ImGui::TextDisabled(ICON_FA_VOLUME_UP " 音量上/下 : 收起 / 展开");
             ImGui::Unindent(16.0f);
             ImGui::Spacing();
         }
