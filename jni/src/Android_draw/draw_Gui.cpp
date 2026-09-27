@@ -8,7 +8,6 @@
    
 #include "My_icon/pic_ZhenAiKun_png.h"
 
-// ===== 音量键监听需要的头文件 =====
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -52,28 +51,44 @@ struct GlassAnimState {
 };
 static GlassAnimState g_anim;
 
+
 // =====================================================================
 //  音量键隐藏 / 展开 状态
 // =====================================================================
 static volatile int g_volume_toggle_request = 0;
 static bool         g_volume_thread_started = false;
 static bool         g_ui_hidden             = false;
-static float        g_hide_progress         = 0.0f;
-static float        g_expanded_pos_y        = -99999.0f;
+static float        g_hide_progress         = 0.0f;   // 0=完整窗口, 1=胶囊
 
 
 // =====================================================================
-//  计算收起后应该在屏幕顶部保留多少像素
-//  横竖屏自适应：按屏幕短边比例算，限制在 40 ~ 120 px
+//  动态计算展开 / 胶囊 的目标位置与尺寸
+//  关键修复：不再用 short_side/long_side 算，避免横屏时超出屏幕
 // =====================================================================
-static float CalcPeekHeight() {
-    float short_side = (float)((native_window_screen_x < native_window_screen_y)
-                               ? native_window_screen_x
-                               : native_window_screen_y);
-    float h = short_side * 0.06f;
-    if (h < 40.0f)  h = 40.0f;
-    if (h > 120.0f) h = 120.0f;
-    return h;
+static ImVec2 CalcExpandedSize() {
+    float sx = (float)native_window_screen_x;   // 逻辑宽
+    float sy = (float)native_window_screen_y;   // 逻辑高
+    return ImVec2(sx * 0.92f, sy * 0.75f);
+}
+
+static ImVec2 CalcExpandedPos(ImVec2 sz) {
+    float x = ((float)native_window_screen_x - sz.x) * 0.5f;
+    float y = ((float)native_window_screen_y - sz.y) * 0.5f;
+    return ImVec2(x, y);
+}
+
+static ImVec2 CalcCapsuleSize() {
+    float sx = (float)native_window_screen_x;
+    // 胶囊宽度取屏幕宽的 55%，但不超过 900px（避免横屏时拉太长）
+    float w = sx * 0.55f;
+    if (w > 900.0f) w = 900.0f;
+    return ImVec2(w, 140.0f);
+}
+
+static ImVec2 CalcCapsulePos(ImVec2 sz) {
+    float x = ((float)native_window_screen_x - sz.x) * 0.5f;
+    float y = 60.0f;   // 顶部留白
+    return ImVec2(x, y);
 }
 
 
@@ -134,7 +149,7 @@ static void UpdateHideAnimation() {
     if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
 
     const float target = g_ui_hidden ? 1.0f : 0.0f;
-    const float k = 9.0f;
+    const float k = 10.0f;
     float t = 1.0f - expf(-k * dt);
     if (t > 1.0f) t = 1.0f;
 
@@ -381,10 +396,9 @@ void init_My_drawdata() {
     ApplyLiquidGlassWindowStyle();
     ResetGlassFadeIn();
 
-    // 重建时把隐藏状态复位，避免重建后卡在屏幕外
-    g_ui_hidden      = false;
-    g_hide_progress  = 0.0f;
-    g_expanded_pos_y = -99999.0f;
+    // 重建时把隐藏状态复位
+    g_ui_hidden     = false;
+    g_hide_progress = 0.0f;
 }
 
 
@@ -403,7 +417,7 @@ void drawBegin() {
         android::ANativeWindowCreator::Destroy(::window);
         ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
         graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-        ::init_My_drawdata();   // 内部会把隐藏状态复位
+        ::init_My_drawdata();
 
         g_window = NULL;
         ResetMouseToNeutralPosition();
@@ -420,12 +434,8 @@ void drawBegin() {
         g_need_reset_interaction = true;
 
         ResetGlassFadeIn();
-
-        // ===== 关键：方向切换时把隐藏状态完全复位 =====
-        // 否则切到横屏后窗口会卡在屏幕外或第一帧跳到错误位置
-        g_ui_hidden      = false;
-        g_hide_progress  = 0.0f;
-        g_expanded_pos_y = -99999.0f;   // 下一帧 Begin 会重新记录展开位置
+        g_ui_hidden     = false;
+        g_hide_progress = 0.0f;
     }
 }
 
@@ -440,7 +450,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // ===== 处理音量键触发：切换隐藏状态 =====
+    // ===== 处理音量键：切换隐藏 / 展开 =====
     if (__sync_lock_test_and_set(&g_volume_toggle_request, 0) > 0) {
         g_ui_hidden = !g_ui_hidden;
     }
@@ -449,10 +459,8 @@ void Layout_tick_UI(bool *main_thread_flag) {
     UpdateGlassAnimation();
     UpdateHideAnimation();
 
-    // 打断 ImGui 残留交互
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
-
         ImGui::ClearActiveID();
         if (ImGuiContext *ctx = ImGui::GetCurrentContext()) {
             ctx->HoveredId = 0;
@@ -469,112 +477,129 @@ void Layout_tick_UI(bool *main_thread_flag) {
         static int style_idx = 0;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-        ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag);
+        // ===== 计算当前位置和尺寸（展开 <-> 胶囊 之间插值）=====
+        ImVec2 exp_size = CalcExpandedSize();
+        ImVec2 exp_pos  = CalcExpandedPos(exp_size);
+        ImVec2 cap_size = CalcCapsuleSize();
+        ImVec2 cap_pos  = CalcCapsulePos(cap_size);
 
-        // ===== 记录 / 应用隐藏动画的窗口位置 =====
-        // 横竖屏通用：窗口始终"向屏幕顶部方向"滑出
-        {
-            ImVec2 cur_pos  = ImGui::GetWindowPos();
-            ImVec2 cur_size = ImGui::GetWindowSize();
+        ImVec2 cur_size = ImVec2(
+            exp_size.x + (cap_size.x - exp_size.x) * g_hide_progress,
+            exp_size.y + (cap_size.y - exp_size.y) * g_hide_progress
+        );
+        ImVec2 cur_pos = ImVec2(
+            exp_pos.x + (cap_pos.x - exp_pos.x) * g_hide_progress,
+            exp_pos.y + (cap_pos.y - exp_pos.y) * g_hide_progress
+        );
 
-            if (g_expanded_pos_y < -90000.0f) {
-                g_expanded_pos_y = cur_pos.y;
+        ImGui::SetNextWindowPos(cur_pos);
+        ImGui::SetNextWindowSize(cur_size);
+        ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag,
+                     ImGuiWindowFlags_NoTitleBar |
+                     ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings);
+
+        // ============= 内容：胶囊 vs 完整，按进度切换 =============
+        if (g_hide_progress > 0.15f) {
+            // ---------- 胶囊内容：单行摘要 ----------
+            ImGui::SetCursorPosY((cur_size.y - ImGui::GetTextLineHeight()) * 0.5f);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 24.0f);
+
+            ImGui::Text("%s   %s   %.0f FPS",
+                        ICON_FA_MICROCHIP,
+                        graphics->RenderName,
+                        ImGui::GetIO().Framerate);
+        } else {
+            // ---------- 完整内容 ----------
+            if (::permeate_record_ini) {
+                ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
+                ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
+                permeate_record_ini = false;
             }
 
-            if (g_hide_progress > 0.001f) {
-                const float peek  = CalcPeekHeight();      // 收起后露头高度，横竖屏自适应
-                const float offset = -(cur_size.y - peek) * g_hide_progress;
-                ImGui::SetWindowPos(ImVec2(cur_pos.x, g_expanded_pos_y + offset));
-            } else if (!g_ui_hidden) {
-                g_expanded_pos_y = cur_pos.y;
-            }
-        }
-        // ========================================
-
-        if (::permeate_record_ini) {
-            ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
-            ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
-            permeate_record_ini = false;
-        }
-
-        // ============= 顶部标题栏 =============
-        ImGui::TextDisabled(ICON_FA_MICROCHIP "  %s", graphics->RenderName);
-        ImGui::SameLine();
-        ImGui::TextDisabled("  ·  " ICON_FA_CODE "  %s", ImGui::GetVersion());
-        ImGui::SameLine();
-        ImGui::TextDisabled("  ·  " ICON_FA_MOBILE_ALT "  %s",
-                            (native_window_screen_x < native_window_screen_y) ? "竖屏" : "横屏");
-        ImGui::Spacing();
-
-        // ============= 分组 1：外观主题 =============
-        if (ImGui::CollapsingHeader(ICON_FA_PALETTE "  外观主题", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent(16.0f);
-            ImGui::TextDisabled("整体视觉风格（切换带平滑过渡）");
-            ImGui::SetNextItemWidth(-1.0f);
-            if (ImGui::Combo("##theme_combo", &style_idx, "深色主题\0亮色主题\0经典主题\0")) {
-                switch (style_idx) {
-                    case 0: ApplyLiquidGlassWindowStyle(); break;
-                    case 1: ApplyLiquidGlassLightStyle();  break;
-                    case 2:
-                        ImGui::StyleColorsClassic();
-                        CaptureCurrentColorsAsTarget();
-                        break;
-                }
-            }
-            ImGui::Unindent(16.0f);
-            ImGui::Spacing();
-        }
-
-        // ============= 分组 2：窗口控制 =============
-        if (ImGui::CollapsingHeader(ICON_FA_WINDOW_RESTORE "  窗口控制", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent(16.0f);
-            if (ImGui::Checkbox(ICON_FA_VIDEO "  过录制", &::permeate_record)) {
-                ::permeate_record_ini = true;
-            }
-            ImGui::Checkbox(ICON_FA_IMAGE "  演示窗口", &show_demo_window);
-            ImGui::Checkbox(ICON_FA_DRAW_POLYGON "  绘制射线", &show_draw_Line);
-            ImGui::Checkbox(ICON_FA_CAT "  坤坤窗口", &show_another_window);
-            ImGui::Unindent(16.0f);
-            ImGui::Spacing();
-        }
-
-        // ============= 分组 3：控件测试 =============
-        if (ImGui::CollapsingHeader(ICON_FA_SLIDERS_H "  控件测试", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent(16.0f);
-
-            ImGui::TextDisabled("滑块");
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::SliderFloat("##float_slider", &f, 0.0f, 1.0f, "数值 = %.2f");
-
-            ImGui::TextDisabled("取色器");
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::ColorEdit4("##color_picker", (float *) &clear_color);
-
-            ImGui::Spacing();
-            if (ImGui::Button(ICON_FA_PLUS "  点击 +1", ImVec2(0, 0))) {
-                counter++;
-            }
+            // 顶部标题栏
+            ImGui::TextDisabled(ICON_FA_MICROCHIP "  %s", graphics->RenderName);
             ImGui::SameLine();
-            ImGui::Text("计数 = %d", counter);
-
-            ImGui::Unindent(16.0f);
+            ImGui::TextDisabled("  ·  " ICON_FA_CODE "  %s", ImGui::GetVersion());
+            ImGui::SameLine();
+            ImGui::TextDisabled("  ·  " ICON_FA_MOBILE_ALT "  %s",
+                                (native_window_screen_x < native_window_screen_y) ? "竖屏" : "横屏");
             ImGui::Spacing();
+
+            // 分组 1：外观主题
+            if (ImGui::CollapsingHeader(ICON_FA_PALETTE "  外观主题", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent(16.0f);
+                ImGui::TextDisabled("整体视觉风格（切换带平滑过渡）");
+                ImGui::SetNextItemWidth(-1.0f);
+                if (ImGui::Combo("##theme_combo", &style_idx, "深色主题\0亮色主题\0经典主题\0")) {
+                    switch (style_idx) {
+                        case 0: ApplyLiquidGlassWindowStyle(); break;
+                        case 1: ApplyLiquidGlassLightStyle();  break;
+                        case 2:
+                            ImGui::StyleColorsClassic();
+                            CaptureCurrentColorsAsTarget();
+                            break;
+                    }
+                }
+                ImGui::Unindent(16.0f);
+                ImGui::Spacing();
+            }
+
+            // 分组 2：窗口控制
+            if (ImGui::CollapsingHeader(ICON_FA_WINDOW_RESTORE "  窗口控制", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent(16.0f);
+                if (ImGui::Checkbox(ICON_FA_VIDEO "  过录制", &::permeate_record)) {
+                    ::permeate_record_ini = true;
+                }
+                ImGui::Checkbox(ICON_FA_IMAGE "  演示窗口", &show_demo_window);
+                ImGui::Checkbox(ICON_FA_DRAW_POLYGON "  绘制射线", &show_draw_Line);
+                ImGui::Checkbox(ICON_FA_CAT "  坤坤窗口", &show_another_window);
+                ImGui::Unindent(16.0f);
+                ImGui::Spacing();
+            }
+
+            // 分组 3：控件测试
+            if (ImGui::CollapsingHeader(ICON_FA_SLIDERS_H "  控件测试", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent(16.0f);
+
+                ImGui::TextDisabled("滑块");
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::SliderFloat("##float_slider", &f, 0.0f, 1.0f, "数值 = %.2f");
+
+                ImGui::TextDisabled("取色器");
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::ColorEdit4("##color_picker", (float *) &clear_color);
+
+                ImGui::Spacing();
+                if (ImGui::Button(ICON_FA_PLUS "  点击 +1", ImVec2(0, 0))) {
+                    counter++;
+                }
+                ImGui::SameLine();
+                ImGui::Text("计数 = %d", counter);
+
+                ImGui::Unindent(16.0f);
+                ImGui::Spacing();
+            }
+
+            // 分组 4：运行状态
+            if (ImGui::CollapsingHeader(ICON_FA_INFO_CIRCLE "  运行状态", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent(16.0f);
+                ImGui::Text("窗口集中 = %d", ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow));
+                ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f),
+                                   ICON_FA_TACHOMETER_ALT "  %.1f FPS   (%.3f ms/frame)",
+                                   ImGui::GetIO().Framerate,
+                                   1000.0f / ImGui::GetIO().Framerate);
+                ImGui::TextDisabled(ICON_FA_VOLUME_UP " 音量上/下 : 收起 / 展开");
+                ImGui::Unindent(16.0f);
+                ImGui::Spacing();
+            }
+
+            g_window = ImGui::GetCurrentWindow();
         }
 
-        // ============= 分组 4：运行状态 =============
-        if (ImGui::CollapsingHeader(ICON_FA_INFO_CIRCLE "  运行状态", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent(16.0f);
-            ImGui::Text("窗口集中 = %d", ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow));
-            ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f),
-                               ICON_FA_TACHOMETER_ALT "  %.1f FPS   (%.3f ms/frame)",
-                               ImGui::GetIO().Framerate,
-                               1000.0f / ImGui::GetIO().Framerate);
-            ImGui::TextDisabled(ICON_FA_VOLUME_UP " 音量上/下 : 收起 / 展开");
-            ImGui::Unindent(16.0f);
-            ImGui::Spacing();
-        }
-
-        g_window = ImGui::GetCurrentWindow();
         ImGui::End();
     }
 
