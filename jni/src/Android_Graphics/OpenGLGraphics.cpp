@@ -48,7 +48,7 @@ void OpenGLGraphics::Setup() {
 }
 
 void OpenGLGraphics::PrepareFrame(bool resize) {
-    // 修复：之前此处直接丢弃 resize 参数，从不重新读取 ANativeWindow 尺寸，
+    // 修复：原实现丢弃了 resize 参数，从不重新读取 ANativeWindow 尺寸，
     // 导致基类 m_Width / m_Height（上游用于设置 ImGuiIO::DisplaySize）长期停留在旧值。
     // 当 Surface 尺寸变化或与初始尺寸不一致时，ImGui 的投影矩阵 / 裁剪矩形会比真实屏幕小，
     // 控件被拖动到“旧边界”之外（表现为屏幕下半部分）就会被直接裁掉。
@@ -56,7 +56,7 @@ void OpenGLGraphics::PrepareFrame(bool resize) {
     int height = ANativeWindow_getHeight(m_Window);
 
     if (width > 0 && height > 0) {
-        // 判断尺寸是否发生变化（m_Width/m_Height 是基类中的 float 成员）
+        // m_Width / m_Height 是基类 AndroidImgui 中的 float 成员
         if (resize || (int)m_Width != width || (int)m_Height != height) {
             m_Width  = (float)width;
             m_Height = (float)height;
