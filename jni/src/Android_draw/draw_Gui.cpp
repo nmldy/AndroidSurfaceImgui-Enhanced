@@ -15,6 +15,9 @@
 #include <linux/input.h>
 #include <vector>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 
 bool permeate_record = false;
 bool permeate_record_ini = false;
@@ -37,15 +40,53 @@ ImFont* icon_font_2 = NULL;
 
 
 static bool g_need_reset_interaction = false;
-
-// 等待抬手指标志：重建 / 切方向后进入冻结状态
 static bool g_wait_release = false;
 
 
 // =====================================================================
-//  用户当前的展开态位置尺寸（用户可以拖拽修改，动画以它为起点）
-//  - g_user_exp_size.x < 0 表示"尚未初始化"，会用公式重算
-//  - g_user_exp_placed 表示是否已经把位置尺寸应用给 ImGui 一次
+//  主题持久化 —— 单文件、原子写、静默失败
+//  路径固定：/data/local/tmp/AImGui_theme.txt
+//  格式：AIMGUI_THEME:<0|1|2>
+// =====================================================================
+static int g_current_theme_idx = 0;
+
+static const char *kThemeFilePath = "/data/local/tmp/AImGui_theme.txt";
+static const char *kThemeMagic    = "AIMGUI_THEME:";
+
+static int LoadThemeIndex() {
+    int fd = open(kThemeFilePath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+
+    char buf[32] = {0};
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (n <= 0) return 0;
+
+    size_t magic_len = strlen(kThemeMagic);
+    if ((size_t)n < magic_len) return 0;
+    if (strncmp(buf, kThemeMagic, magic_len) != 0) return 0;
+
+    int v = atoi(buf + magic_len);
+    if (v < 0 || v > 2) return 0;
+    return v;
+}
+
+static void SaveThemeIndex(int v) {
+    int fd = open(kThemeFilePath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%s%d\n", kThemeMagic, v);
+
+    (void) write(fd, buf, len);
+    (void) fsync(fd);
+    close(fd);
+}
+
+
+// =====================================================================
+//  用户当前展开态位置尺寸
 // =====================================================================
 static ImVec2 g_user_exp_pos  = ImVec2(-1.0f, -1.0f);
 static ImVec2 g_user_exp_size = ImVec2(-1.0f, -1.0f);
@@ -83,7 +124,7 @@ static bool IsLandscape() {
 
 
 // =====================================================================
-//  公式算出的默认展开态位置尺寸（仅在 g_user_exp_size 未初始化时使用）
+//  公式算出的默认展开态位置尺寸
 // =====================================================================
 static ImVec2 CalcDefaultExpandedSize() {
     float sx = (float)native_window_screen_x;
@@ -122,7 +163,6 @@ static ImVec2 CalcCapsulePos(ImVec2 sz) {
     return ImVec2(x, y);
 }
 
-// 重置用户展开态：下次 Layout 会用公式重算
 static void ResetUserExpandedState() {
     g_user_exp_size   = ImVec2(-1.0f, -1.0f);
     g_user_exp_pos    = ImVec2(-1.0f, -1.0f);
@@ -187,7 +227,7 @@ static void UpdateHideAnimation() {
     if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
 
     const float target = g_ui_hidden ? 1.0f : 0.0f;
-    const float k = 6.0f;   // 约 0.5s，能看清伸缩过程
+    const float k = 6.0f;
     float t = 1.0f - expf(-k * dt);
     if (t > 1.0f) t = 1.0f;
 
@@ -272,7 +312,6 @@ static void UpdateGlassAnimation() {
 
 // =====================================================================
 //  样式与配色
-//  注意：不再用 ScaleAllSizes(3.25)，改绝对值，避免控件被撑得很大
 // =====================================================================
 static void ApplyLiquidGlassShapeAndSpacing() {
     ImGuiStyle &style = ImGui::GetStyle();
@@ -412,8 +451,46 @@ static void ApplyLiquidGlassLightStyle() {
 }
 
 
+// =====================================================================
+//  按索引应用主题
+//  - save=true 时写入文件（只在用户主动切换时调用）
+//  - save=false 用于被动场景（重建 / 方向切换），不重复写盘
+// =====================================================================
+static void ApplyThemeByIndex(int idx, bool save = true) {
+    if (idx < 0 || idx > 2) idx = 0;
+    g_current_theme_idx = idx;
+
+    // 把当前正在显示的颜色记为过渡起点，避免切换瞬间闪一帧
+    {
+        ImGuiStyle &style = ImGui::GetStyle();
+        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
+            g_anim.colors_current[i] = style.Colors[i];
+        }
+        g_anim.colors_inited = true;
+    }
+
+    switch (idx) {
+        case 0: ApplyLiquidGlassWindowStyle(); break;
+        case 1: ApplyLiquidGlassLightStyle();  break;
+        case 2:
+            ApplyLiquidGlassShapeAndSpacing();
+            ImGui::StyleColorsClassic();
+            CaptureCurrentColorsAsTarget();
+            break;
+    }
+
+    if (save) {
+        SaveThemeIndex(g_current_theme_idx);
+    }
+}
+
+
 bool M_Android_LoadFont(float SizePixels) {
     ImGuiIO &io = ImGui::GetIO();
+
+    if (zh_font == nullptr || io.Fonts->Fonts.empty()) {
+        return false;
+    }
 
     static const ImWchar icons_ranges[] = {ICON_MIN_FA, ICON_MAX_FA, 0};
     ImFontConfig icons_config;
@@ -437,16 +514,17 @@ void init_My_drawdata() {
 
     ::Aekun_image = graphics->LoadTextureFromMemory((void *)picture_ZhenAiKun_PNG_H, sizeof(picture_ZhenAiKun_PNG_H));
 
-    ApplyLiquidGlassWindowStyle();
+    g_current_theme_idx = LoadThemeIndex();
+
+    ApplyThemeByIndex(g_current_theme_idx, /*save=*/false);
+
     ResetGlassFadeIn();
 
     g_ui_hidden     = false;
     g_hide_progress = 0.0f;
 
-    // 重建后让用户展开态重新计算
     ResetUserExpandedState();
 }
-
 
 void screen_config() {
     ::displayInfo = android::ANativeWindowCreator::GetDisplayInfo();
@@ -454,16 +532,20 @@ void screen_config() {
 
 void drawBegin() {
     if (::permeate_record_ini) {
-        LastCoordinate.Pos_x = ::g_window->Pos.x;
-        LastCoordinate.Pos_y = ::g_window->Pos.y;
-        LastCoordinate.Size_x = ::g_window->Size.x;
-        LastCoordinate.Size_y = ::g_window->Size.y;
+        if (::g_window != nullptr) {
+            LastCoordinate.Pos_x = ::g_window->Pos.x;
+            LastCoordinate.Pos_y = ::g_window->Pos.y;
+            LastCoordinate.Size_x = ::g_window->Size.x;
+            LastCoordinate.Size_y = ::g_window->Size.y;
+        } else {
+            LastCoordinate = {0, 0, 0, 0};
+        }
 
         graphics->Shutdown();
         android::ANativeWindowCreator::Destroy(::window);
         ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
         graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-        ::init_My_drawdata();   // 内部会 ResetUserExpandedState
+        ::init_My_drawdata();
 
         g_window = NULL;
         ResetMouseToNeutralPosition();
@@ -483,14 +565,13 @@ void drawBegin() {
         g_ui_hidden     = false;
         g_hide_progress = 0.0f;
 
-        // 方向切换也重算展开态
         ResetUserExpandedState();
+
+        ApplyThemeByIndex(g_current_theme_idx, /*save=*/false);
     }
 }
 
-
 void Layout_tick_UI(bool *main_thread_flag) {
-    // ===== 启动音量键线程（只启动一次）=====
     if (!g_volume_thread_started) {
         g_volume_thread_started = true;
         pthread_t t;
@@ -499,16 +580,15 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // ===== 处理音量键：切换隐藏 / 展开 =====
-    if (__sync_lock_test_and_set(&g_volume_toggle_request, 0) > 0) {
+    // 音量键循环 toggle（快速连按也能正确响应）
+    int volume_presses = __sync_lock_test_and_set(&g_volume_toggle_request, 0);
+    while (volume_presses-- > 0) {
         g_ui_hidden = !g_ui_hidden;
     }
 
-    // ===== 每帧驱动动画 =====
     UpdateGlassAnimation();
     UpdateHideAnimation();
 
-    // ===== 等待抬手指：重建 / 切方向后的第一次触摸防误判 =====
     if (g_wait_release) {
         ImGuiIO &io = ImGui::GetIO();
         if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2]) {
@@ -522,7 +602,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             io.MouseDown[2] = false;
         }
     }
-    // ============================================================
 
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
@@ -532,32 +611,35 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // ===== 展开态尺寸如果还没算过，用公式算一次 =====
     if (g_user_exp_size.x < 0.0f) {
         g_user_exp_size   = CalcDefaultExpandedSize();
         g_user_exp_pos    = CalcDefaultExpandedPos(g_user_exp_size);
         g_user_exp_placed = false;
     }
-    // ============================================================
 
     static bool show_draw_Line = false;
     static bool show_demo_window = false;
     static bool show_another_window = false;
 
+    // 缓存胶囊文本，避免每帧重建字符串
+    static char capsule_buf[128] = {0};
+    static float capsule_text_w = 0.0f;
+
     {
         static float f = 0.0f;
         static int counter = 0;
-        static int style_idx = 0;
+        static int style_idx = g_current_theme_idx;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-        // 是否处于"完全展开"的静止状态
+        if (style_idx != g_current_theme_idx) {
+            style_idx = g_current_theme_idx;
+        }
+
         const bool fully_expanded = (!g_ui_hidden && g_hide_progress < 0.01f);
 
-        // 胶囊态
         ImVec2 cap_size = CalcCapsuleSize();
         ImVec2 cap_pos  = CalcCapsulePos(cap_size);
 
-        // 两阶段进度
         float move_t = g_hide_progress / 0.6f;
         if (move_t > 1.0f) move_t = 1.0f;
 
@@ -565,13 +647,11 @@ void Layout_tick_UI(bool *main_thread_flag) {
         if (shrink_t < 0.0f) shrink_t = 0.0f;
         if (shrink_t > 1.0f) shrink_t = 1.0f;
 
-        // 当前尺寸：从"用户展开态尺寸"向胶囊尺寸插值
         ImVec2 cur_size = ImVec2(
             g_user_exp_size.x + (cap_size.x - g_user_exp_size.x) * shrink_t,
             g_user_exp_size.y + (cap_size.y - g_user_exp_size.y) * shrink_t
         );
 
-        // 当前位置：y 从"用户展开态 y"向"胶囊 y"插值，x 始终水平居中
         float pos_y = g_user_exp_pos.y + (cap_pos.y - g_user_exp_pos.y) * move_t;
         float cur_x = ((float)native_window_screen_x - cur_size.x) * 0.5f;
         ImVec2 cur_pos = ImVec2(cur_x, pos_y);
@@ -611,18 +691,12 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
         // ============================================================
 
-        // 动态圆角 / 内边距
         float dyn_rounding = 22.0f + (cap_size.y * 0.5f - 22.0f) * shrink_t;
         ImVec2 dyn_padding(
             16.0f + (8.0f - 16.0f) * shrink_t,
             16.0f + (8.0f - 16.0f) * shrink_t
         );
 
-        // ============================================================
-        //  位置尺寸的应用策略：
-        //    完全展开 → 只在首次应用一次，之后让 ImGui 保留用户拖拽的结果
-        //    动画中 / 已收起 → 每帧强制
-        // ============================================================
         if (!fully_expanded || !g_user_exp_placed) {
             ImGui::SetNextWindowPos(cur_pos);
             ImGui::SetNextWindowSize(cur_size);
@@ -638,19 +712,27 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoSavedSettings;
 
-        // 只有动画中 / 已收起时才禁用用户的拖拽
         if (!fully_expanded) {
+            // 动画中 / 已收起时不允许用户拖拽
             flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
         }
 
+        // 【优化】完全收起时窗口不响应任何输入，
+        // 避免触摸穿透到胶囊导致误触（展开只靠音量键）
+        const bool fully_hidden = (g_ui_hidden && g_hide_progress > 0.99f);
+        if (fully_hidden) {
+            flags |= ImGuiWindowFlags_NoInputs;
+        }
+
         ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag, flags);
-        // ============================================================
 
         if (shrink_t < 0.5f) {
             // ---------- 完整内容 ----------
             if (::permeate_record_ini) {
-                ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
-                ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
+                if (LastCoordinate.Size_x > 1.0f && LastCoordinate.Size_y > 1.0f) {
+                    ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
+                    ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
+                }
                 permeate_record_ini = false;
             }
 
@@ -667,14 +749,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
                 ImGui::TextDisabled("整体视觉风格（切换带平滑过渡）");
                 ImGui::SetNextItemWidth(-1.0f);
                 if (ImGui::Combo("##theme_combo", &style_idx, "深色主题\0亮色主题\0经典主题\0")) {
-                    switch (style_idx) {
-                        case 0: ApplyLiquidGlassWindowStyle(); break;
-                        case 1: ApplyLiquidGlassLightStyle();  break;
-                        case 2:
-                            ImGui::StyleColorsClassic();
-                            CaptureCurrentColorsAsTarget();
-                            break;
-                    }
+                    ApplyThemeByIndex(style_idx, /*save=*/true);
                 }
                 ImGui::Unindent(12.0f);
                 ImGui::Spacing();
@@ -713,10 +788,12 @@ void Layout_tick_UI(bool *main_thread_flag) {
             if (ImGui::CollapsingHeader(ICON_FA_INFO_CIRCLE "  运行状态", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Indent(12.0f);
                 ImGui::Text("窗口集中 = %d", ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow));
+
+                const float fps = ImGui::GetIO().Framerate;
+                const float ms_per_frame = (fps > 0.0f) ? (1000.0f / fps) : 0.0f;
                 ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f),
                                    ICON_FA_TACHOMETER_ALT "  %.1f FPS   (%.3f ms/frame)",
-                                   ImGui::GetIO().Framerate,
-                                   1000.0f / ImGui::GetIO().Framerate);
+                                   fps, ms_per_frame);
                 ImGui::TextDisabled(ICON_FA_VOLUME_UP " 音量上/下 : 收起 / 展开");
                 ImGui::Unindent(12.0f);
                 ImGui::Spacing();
@@ -725,27 +802,44 @@ void Layout_tick_UI(bool *main_thread_flag) {
             g_window = ImGui::GetCurrentWindow();
 
         } else {
-            // ---------- 胶囊内容 ----------
+            // ---------- 胶囊内容：单行摘要 ----------
+            // 【优化】重建一次缓存文本（宽度变化只与屏幕宽度相关，无需每帧算）
+            if (capsule_buf[0] == 0 ||
+                fabsf(capsule_text_w) < 0.01f) {
+                snprintf(capsule_buf, sizeof(capsule_buf), "%s   %s   %.0f FPS",
+                         ICON_FA_MICROCHIP,
+                         graphics->RenderName,
+                         ImGui::GetIO().Framerate);
+                capsule_text_w = ImGui::CalcTextSize(capsule_buf).x;
+            }
+
             float text_h = ImGui::GetTextLineHeight();
             ImGui::SetCursorPosY((cur_size.y - text_h) * 0.5f);
-
-            char buf[128];
-            snprintf(buf, sizeof(buf), "%s   %s   %.0f FPS",
-                     ICON_FA_MICROCHIP,
-                     graphics->RenderName,
-                     ImGui::GetIO().Framerate);
-            float text_w = ImGui::CalcTextSize(buf).x;
-            ImGui::SetCursorPosX((cur_size.x - text_w) * 0.5f);
-
-            ImGui::TextUnformatted(buf);
+            ImGui::SetCursorPosX((cur_size.x - capsule_text_w) * 0.5f);
+            ImGui::TextUnformatted(capsule_buf);
 
             g_window = ImGui::GetCurrentWindow();
         }
 
-        // 完全展开时：读回 ImGui 当前的实际位置尺寸（用户可能拖拽过）
         if (fully_expanded) {
-            g_user_exp_pos  = ImGui::GetWindowPos();
-            g_user_exp_size = ImGui::GetWindowSize();
+            ImVec2 win_pos = ImGui::GetWindowPos();
+            ImVec2 win_size = ImGui::GetWindowSize();
+
+            // 保证至少 100px 可见，防止窗口被拖/缩到屏幕外"丢失"
+            const float scr_w = (float)native_window_screen_x;
+            const float scr_h = (float)native_window_screen_y;
+            const float min_visible = 100.0f;
+
+            if (win_size.x > scr_w) win_size.x = scr_w;
+            if (win_size.y > scr_h) win_size.y = scr_h;
+
+            if (win_pos.x < min_visible - win_size.x)  win_pos.x = min_visible - win_size.x;
+            if (win_pos.x > scr_w - min_visible)       win_pos.x = scr_w - min_visible;
+            if (win_pos.y < min_visible - win_size.y)  win_pos.y = min_visible - win_size.y;
+            if (win_pos.y > scr_h - min_visible)       win_pos.y = scr_h - min_visible;
+
+            g_user_exp_pos    = win_pos;
+            g_user_exp_size   = win_size;
             g_user_exp_placed = true;
         }
 
