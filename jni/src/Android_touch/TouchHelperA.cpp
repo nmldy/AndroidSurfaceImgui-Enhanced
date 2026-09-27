@@ -226,6 +226,25 @@ namespace Touch {
         return itmp && itmp2 && itmp3;
     }
 
+    // 清空指定 fd 上残留的 input 事件（切换方向时手指可能还按着，旧事件会污染新会话）
+    static void FlushInputQueue(int fd) {
+        if (fd < 0) return;
+
+        // 1) 临时设为非阻塞，避免 read 卡住
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0) flags = 0;
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+        // 2) 一次性读完所有残留事件并丢弃
+        input_event dummy[64];
+        while (read(fd, dummy, sizeof(dummy)) > 0) {
+            // 丢弃
+        }
+
+        // 3) 恢复原来的阻塞模式，保持 TypeA 的低 CPU 占用
+        fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+
     bool Init(const My_Vector2 &s, bool p_readOnly) {
         Close();
         devices.clear();
@@ -258,6 +277,11 @@ namespace Touch {
                 Device device{};
                 if (ioctl(fd, EVIOCGABS(ABS_MT_POSITION_X), &device.absX) == 0
                     && ioctl(fd, EVIOCGABS(ABS_MT_POSITION_Y), &device.absY) == 0) {
+
+                    // 关键：清空这个设备上残留的旧事件，避免切换方向时
+                    // 手指还按着导致旧坐标/旧按下状态污染新会话。
+                    FlushInputQueue(fd);
+
                     device.fd = fd;
                     if (!readOnly) {
                         ioctl(fd, EVIOCGRAB, GRAB);
