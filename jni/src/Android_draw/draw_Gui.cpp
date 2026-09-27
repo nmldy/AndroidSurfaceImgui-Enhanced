@@ -29,28 +29,45 @@ ImFont* icon_font_2 = NULL;
 
 
 // =====================================================================
-//  方向切换时需要打断 ImGui 残留交互（例如 resize grip 被锁住）
-//  仅作为文件内 static 变量，不对外暴露
+//  方向切换 / 窗口重建时需要打断 ImGui 残留交互
 // =====================================================================
 static bool g_need_reset_interaction = false;
 
 
 // =====================================================================
-//  第 1 步：液态玻璃窗口的视觉基础
-//  关键修复：函数开头先重置为 ImGui 默认样式，避免多次调用时
-//  ScaleAllSizes 累积放大导致布局爆炸（表现为"卡住"）。
+//  重建 / 切屏后给新上下文一个中性的鼠标初始状态
 // =====================================================================
-static void ApplyLiquidGlassWindowStyle() {
+static void ResetMouseToNeutralPosition() {
+    if (ImGui::GetCurrentContext() == nullptr)
+        return;
+
+    ImGuiIO &io = ImGui::GetIO();
+
+    const float cx = (float)(native_window_screen_x) * 0.5f;
+    const float cy = (float)(native_window_screen_y) * 0.5f;
+
+    io.MousePos          = ImVec2(cx, cy);
+    io.MousePosPrev      = ImVec2(cx, cy);
+    io.MouseDelta        = ImVec2(0.0f, 0.0f);
+    io.MouseDown[0]      = false;
+    io.MouseDown[1]      = false;
+    io.MouseDown[2]      = false;
+}
+
+
+// =====================================================================
+//  液态玻璃：公共形状与间距（先重置再缩放，幂等）
+// =====================================================================
+static void ApplyLiquidGlassShapeAndSpacing() {
     ImGuiStyle &style = ImGui::GetStyle();
 
-    // ---------- 1) 重置为 ImGui 默认样式（防止累积）----------
+    // 重置为 ImGui 默认样式，避免多次调用时 ScaleAllSizes 累积
     style = ImGuiStyle();
 
-    // ---------- 2) 基础缩放 ----------
-    // 只在 ApplyLiquidGlassWindowStyle 里做一次缩放，函数是幂等的
+    // 基础缩放
     style.ScaleAllSizes(3.25f);
 
-    // ---------- 3) 大圆角（覆盖默认值，绝对值）----------
+    // 大圆角
     style.WindowRounding    = 36.0f;
     style.ChildRounding     = 28.0f;
     style.FrameRounding     = 18.0f;
@@ -59,7 +76,7 @@ static void ApplyLiquidGlassWindowStyle() {
     style.GrabRounding      = 14.0f;
     style.TabRounding       = 18.0f;
 
-    // ---------- 4) 描边、间距 ----------
+    // 描边、间距
     style.WindowBorderSize  = 1.0f;
     style.ChildBorderSize   = 1.0f;
     style.PopupBorderSize   = 1.0f;
@@ -69,23 +86,30 @@ static void ApplyLiquidGlassWindowStyle() {
     style.ScrollbarSize     = 24.0f;
     style.WindowMinSize     = ImVec2(220.0f, 120.0f);
 
+    style.AntiAliasedLines = true;
+    style.AntiAliasedFill  = true;
+    style.Alpha            = 0.98f;
+}
+
+
+// =====================================================================
+//  液态玻璃：深色配色（默认）
+// =====================================================================
+static void ApplyLiquidGlassDarkColors() {
+    ImGuiStyle &style = ImGui::GetStyle();
     ImVec4 *c = style.Colors;
 
-    // ---------- 5) 窗口背景 = 磨砂深色玻璃 ----------
     c[ImGuiCol_WindowBg]       = ImVec4(0.05f, 0.06f, 0.10f, 0.45f);
     c[ImGuiCol_ChildBg]        = ImVec4(0.08f, 0.09f, 0.14f, 0.35f);
     c[ImGuiCol_PopupBg]        = ImVec4(0.05f, 0.06f, 0.10f, 0.55f);
 
-    // ---------- 6) 边框 = 亮色高光 ----------
     c[ImGuiCol_Border]         = ImVec4(1.00f, 1.00f, 1.00f, 0.28f);
     c[ImGuiCol_BorderShadow]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 
-    // ---------- 7) 标题栏 ----------
     c[ImGuiCol_TitleBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
     c[ImGuiCol_TitleBgActive]    = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_TitleBgCollapsed] = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
 
-    // ---------- 8) 玻璃感控件 ----------
     c[ImGuiCol_FrameBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_FrameBgHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.16f);
     c[ImGuiCol_FrameBgActive]  = ImVec4(1.00f, 1.00f, 1.00f, 0.22f);
@@ -94,7 +118,6 @@ static void ApplyLiquidGlassWindowStyle() {
     c[ImGuiCol_ButtonHovered]  = ImVec4(1.00f, 1.00f, 1.00f, 0.20f);
     c[ImGuiCol_ButtonActive]   = ImVec4(1.00f, 1.00f, 1.00f, 0.28f);
 
-    // ---------- 9) 强调色：冰蓝 ----------
     const ImVec4 glow = ImVec4(0.45f, 0.75f, 1.00f, 1.00f);
     c[ImGuiCol_CheckMark]        = glow;
     c[ImGuiCol_SliderGrab]       = glow;
@@ -103,16 +126,13 @@ static void ApplyLiquidGlassWindowStyle() {
     c[ImGuiCol_HeaderHovered]    = ImVec4(1.00f, 1.00f, 1.00f, 0.18f);
     c[ImGuiCol_HeaderActive]     = ImVec4(1.00f, 1.00f, 1.00f, 0.26f);
 
-    // ---------- 10) 文字 ----------
     c[ImGuiCol_Text]         = ImVec4(0.98f, 0.99f, 1.00f, 1.00f);
     c[ImGuiCol_TextDisabled] = ImVec4(0.75f, 0.78f, 0.85f, 0.75f);
 
-    // ---------- 11) 分隔线 ----------
     c[ImGuiCol_Separator]        = ImVec4(1.00f, 1.00f, 1.00f, 0.12f);
     c[ImGuiCol_SeparatorHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.24f);
     c[ImGuiCol_SeparatorActive]  = glow;
 
-    // ---------- 12) 滚动条 / 拖拽点 ----------
     c[ImGuiCol_ScrollbarBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.04f);
     c[ImGuiCol_ScrollbarGrab]        = ImVec4(1.00f, 1.00f, 1.00f, 0.22f);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.34f);
@@ -120,11 +140,72 @@ static void ApplyLiquidGlassWindowStyle() {
     c[ImGuiCol_ResizeGrip]           = ImVec4(1.00f, 1.00f, 1.00f, 0.18f);
     c[ImGuiCol_ResizeGripHovered]    = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
     c[ImGuiCol_ResizeGripActive]     = glow;
+}
 
-    // ---------- 13) 抗锯齿 / 透明度 ----------
-    style.AntiAliasedLines = true;
-    style.AntiAliasedFill  = true;
-    style.Alpha            = 0.98f;
+
+// =====================================================================
+//  液态玻璃：亮色配色
+// =====================================================================
+static void ApplyLiquidGlassLightColors() {
+    ImGuiStyle &style = ImGui::GetStyle();
+    ImVec4 *c = style.Colors;
+
+    c[ImGuiCol_WindowBg]       = ImVec4(0.98f, 0.98f, 1.00f, 0.55f);
+    c[ImGuiCol_ChildBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.40f);
+    c[ImGuiCol_PopupBg]        = ImVec4(0.99f, 0.99f, 1.00f, 0.65f);
+
+    c[ImGuiCol_Border]         = ImVec4(0.60f, 0.65f, 0.80f, 0.35f);
+    c[ImGuiCol_BorderShadow]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+    c[ImGuiCol_TitleBg]          = ImVec4(0.90f, 0.92f, 0.98f, 0.30f);
+    c[ImGuiCol_TitleBgActive]    = ImVec4(0.85f, 0.90f, 0.98f, 0.45f);
+    c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.90f, 0.92f, 0.98f, 0.30f);
+
+    c[ImGuiCol_FrameBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.55f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
+    c[ImGuiCol_FrameBgActive]  = ImVec4(1.00f, 1.00f, 1.00f, 0.85f);
+
+    c[ImGuiCol_Button]         = ImVec4(0.92f, 0.94f, 1.00f, 0.70f);
+    c[ImGuiCol_ButtonHovered]  = ImVec4(0.85f, 0.90f, 1.00f, 0.85f);
+    c[ImGuiCol_ButtonActive]   = ImVec4(0.78f, 0.86f, 1.00f, 0.95f);
+
+    const ImVec4 accent = ImVec4(0.20f, 0.50f, 0.95f, 1.00f);
+    c[ImGuiCol_CheckMark]        = accent;
+    c[ImGuiCol_SliderGrab]       = accent;
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.10f, 0.40f, 0.85f, 1.00f);
+    c[ImGuiCol_Header]           = ImVec4(0.85f, 0.90f, 1.00f, 0.60f);
+    c[ImGuiCol_HeaderHovered]    = ImVec4(0.78f, 0.86f, 1.00f, 0.80f);
+    c[ImGuiCol_HeaderActive]     = ImVec4(0.70f, 0.80f, 1.00f, 0.90f);
+
+    c[ImGuiCol_Text]         = ImVec4(0.10f, 0.12f, 0.18f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.40f, 0.44f, 0.52f, 0.75f);
+
+    c[ImGuiCol_Separator]        = ImVec4(0.60f, 0.65f, 0.80f, 0.30f);
+    c[ImGuiCol_SeparatorHovered] = ImVec4(0.50f, 0.58f, 0.78f, 0.50f);
+    c[ImGuiCol_SeparatorActive]  = accent;
+
+    c[ImGuiCol_ScrollbarBg]          = ImVec4(0.90f, 0.92f, 0.98f, 0.20f);
+    c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.70f, 0.75f, 0.85f, 0.55f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.68f, 0.82f, 0.75f);
+    c[ImGuiCol_ScrollbarGrabActive]  = accent;
+    c[ImGuiCol_ResizeGrip]           = ImVec4(0.60f, 0.68f, 0.82f, 0.30f);
+    c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.50f, 0.58f, 0.78f, 0.55f);
+    c[ImGuiCol_ResizeGripActive]     = accent;
+}
+
+
+// =====================================================================
+//  液态玻璃：深色（默认，对外入口，保持原函数名）
+// =====================================================================
+static void ApplyLiquidGlassWindowStyle() {
+    ApplyLiquidGlassShapeAndSpacing();
+    ApplyLiquidGlassDarkColors();
+}
+
+// 液态玻璃：亮色
+static void ApplyLiquidGlassLightStyle() {
+    ApplyLiquidGlassShapeAndSpacing();
+    ApplyLiquidGlassLightColors();
 }
 
 
@@ -151,14 +232,9 @@ void init_My_drawdata() {
     ImGui::My_Android_LoadSystemFont(25.0f); // 加载系统字体
     M_Android_LoadFont(25.0f);               // 加载字体 + 图标
 
-    // 注意：ScaleAllSizes(3.25f) 已移入 ApplyLiquidGlassWindowStyle 内部。
-    // 之前放在这里会导致每次 init_My_drawdata 调用时在上一次的基础上继续放大，
-    // 切换方向反复重建时样式会爆炸。现在 ApplyLiquidGlassWindowStyle 内部先重置
-    // 再缩放，是幂等的。
-
     ::Aekun_image = graphics->LoadTextureFromMemory((void *)picture_ZhenAiKun_PNG_H, sizeof(picture_ZhenAiKun_PNG_H));
 
-    // 液态玻璃样式（第 1 步：外观基础）
+    // 液态玻璃样式（默认深色）
     ApplyLiquidGlassWindowStyle();
 }
 
@@ -178,13 +254,10 @@ void drawBegin() {
         android::ANativeWindowCreator::Destroy(::window);
         ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
         graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-        ::init_My_drawdata(); //初始化绘制数据
+        ::init_My_drawdata();
 
-        // 关键修复：ImGui 上下文已被销毁重建，g_window 指向的旧内存已失效。
-        // 必须清空，否则下一帧写 g_window->Pos 会破坏新上下文的状态。
         g_window = NULL;
-
-        // 重建后也打断一次残留交互
+        ResetMouseToNeutralPosition();
         g_need_reset_interaction = true;
     } 
 
@@ -195,19 +268,14 @@ void drawBegin() {
         orientation = displayInfo.orientation;
         Touch::setOrientation((int)displayInfo.orientation);
 
-        // 关键修复：这里不再直接写 g_window->Pos.x/y（悬空指针风险）。
-        // 只置一个标志位，让 Layout_tick_UI 在 Begin 之前用 ImGui 公开 API 处理，
-        // 同时打断可能残留在 resize grip 上的拖拽状态。
+        ResetMouseToNeutralPosition();
         g_need_reset_interaction = true;
     }
 }
 
 
 void Layout_tick_UI(bool *main_thread_flag) {
-    // ===== 关键修复：在 Begin 之前打断 ImGui 残留交互 =====
-    // 方向切换时手指可能还按在屏幕边缘，ImGui 的 ActiveId 会锁在 resize grip 上，
-    // 导致"只能朝一个方向伸缩"。
-    // 注意：ClearHoveredID 在部分 ImGui 版本里不存在，改为直接写上下文内部字段。
+    // 打断 ImGui 残留交互
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
 
@@ -217,7 +285,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ctx->HoveredId = 0;
         }
     }
-    // ====================================================
 
     static bool show_draw_Line = false;
     static bool show_demo_window = false;
@@ -225,6 +292,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
     { 
         static float f = 0.0f;
         static int counter = 0;
+        // 默认深色主题
         static int style_idx = 0;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
         ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag);
@@ -234,13 +302,15 @@ void Layout_tick_UI(bool *main_thread_flag) {
             permeate_record_ini = false;   
         }
         ImGui::Text("渲染接口 : %s, gui版本 : %s", graphics->RenderName, ImGui::GetVersion());
-		if (ImGui::Combo("##主题", &style_idx, "白色主题\0蓝色主题\0紫色主题\0")) {
-			switch (style_idx) {
-				case 0: ImGui::StyleColorsLight(); break;
-				case 1: ImGui::StyleColorsDark(); break;
-				case 2: ImGui::StyleColorsClassic(); break;
-			}
-		}
+
+        // 主题 Combo：深色在前，默认深色
+        if (ImGui::Combo("##主题", &style_idx, "深色主题\0亮色主题\0经典主题\0")) {
+            switch (style_idx) {
+                case 0: ApplyLiquidGlassWindowStyle(); break;    // 深色玻璃
+                case 1: ApplyLiquidGlassLightStyle();  break;    // 亮色玻璃
+                case 2: ImGui::StyleColorsClassic();   break;    // 经典
+            }
+        }
 		
         if (ImGui::Checkbox("过录制", &::permeate_record)) {
             ::permeate_record_ini = true;
