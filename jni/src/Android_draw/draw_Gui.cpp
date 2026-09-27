@@ -47,8 +47,7 @@ static void ApplyLiquidGlassWindowStyle() {
     style = ImGuiStyle();
 
     // ---------- 2) 基础缩放 ----------
-    // 之前这一步在 init_My_drawdata 里单独做，会累积；现在只在这里做一次，
-    // 因为本函数每次调用都是先重置再缩放，幂等。
+    // 只在 ApplyLiquidGlassWindowStyle 里做一次缩放，函数是幂等的
     style.ScaleAllSizes(3.25f);
 
     // ---------- 3) 大圆角（覆盖默认值，绝对值）----------
@@ -197,7 +196,7 @@ void drawBegin() {
         Touch::setOrientation((int)displayInfo.orientation);
 
         // 关键修复：这里不再直接写 g_window->Pos.x/y（悬空指针风险）。
-        // 只置一个标志位，让 Layout_tick_UI 在 Begin 内部用 ImGui 公开 API 处理，
+        // 只置一个标志位，让 Layout_tick_UI 在 Begin 之前用 ImGui 公开 API 处理，
         // 同时打断可能残留在 resize grip 上的拖拽状态。
         g_need_reset_interaction = true;
     }
@@ -207,11 +206,16 @@ void drawBegin() {
 void Layout_tick_UI(bool *main_thread_flag) {
     // ===== 关键修复：在 Begin 之前打断 ImGui 残留交互 =====
     // 方向切换时手指可能还按在屏幕边缘，ImGui 的 ActiveId 会锁在 resize grip 上，
-    // 导致"只能朝一个方向伸缩"。ClearActiveID / ClearHoveredID 会打断这种锁定。
+    // 导致"只能朝一个方向伸缩"。
+    // 注意：ClearHoveredID 在部分 ImGui 版本里不存在，改为直接写上下文内部字段。
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
+
         ImGui::ClearActiveID();
-        ImGui::ClearHoveredID();
+
+        if (ImGuiContext *ctx = ImGui::GetCurrentContext()) {
+            ctx->HoveredId = 0;
+        }
     }
     // ====================================================
 
