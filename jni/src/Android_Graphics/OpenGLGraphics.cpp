@@ -36,10 +36,8 @@ bool OpenGLGraphics::Create() {
     int width  = ANativeWindow_getWidth(m_Window);
     int height = ANativeWindow_getHeight(m_Window);
     if (width > 0 && height > 0) {
-        m_Width  = width;
-        m_Height = height;
-        m_LastWidth  = width;
-        m_LastHeight = height;
+        m_Width  = (float)width;
+        m_Height = (float)height;
         glViewport(0, 0, width, height);
     }
     return true;
@@ -56,16 +54,18 @@ void OpenGLGraphics::PrepareFrame(bool resize) {
     // 控件被拖动到“旧边界”之外（表现为屏幕下半部分）就会被直接裁掉。
     int width  = ANativeWindow_getWidth(m_Window);
     int height = ANativeWindow_getHeight(m_Window);
-    if (width > 0 && height > 0 &&
-        (resize || width != m_LastWidth || height != m_LastHeight ||
-         m_Width != width || m_Height != height)) {
-        m_LastWidth  = width;
-        m_LastHeight = height;
-        m_Width      = width;
-        m_Height     = height;
-        // 显式设置视口，保证 glClear 与 ImGui 渲染都覆盖整个 Surface
-        glViewport(0, 0, width, height);
+
+    if (width > 0 && height > 0) {
+        // 判断尺寸是否发生变化（m_Width/m_Height 是基类中的 float 成员）
+        if (resize || (int)m_Width != width || (int)m_Height != height) {
+            m_Width  = (float)width;
+            m_Height = (float)height;
+
+            // 显式设置视口，保证 glClear 与 ImGui 渲染都覆盖整个 Surface
+            glViewport(0, 0, width, height);
+        }
     }
+
     ImGui_ImplOpenGL3_NewFrame();
 }
 
