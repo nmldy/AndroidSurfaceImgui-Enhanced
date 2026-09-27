@@ -284,9 +284,7 @@ namespace Touch {
         My_Vector2 size = s;
         readOnly = p_readOnly;
 
-        // [改动 1] 原代码：
-        //   if (size.x > size.y) { screenSize = size; } else { screenSize = {size.y, size.x}; }
-        // 现在直接使用屏幕物理方向尺寸，横竖屏自适应
+        // 直接使用屏幕物理方向尺寸，横竖屏自适应
         screenSize = size;
 
         DIR *dir = opendir("/dev/input/");
@@ -421,10 +419,7 @@ namespace Touch {
             pthread_create(&t, nullptr, TypeA, (void *) (long) i);
         }
 
-        // [改动 2] 原代码（会在横竖屏切换时错位）：
-        //   if (size.x > size.y) { std::swap(size.x, size.y); }
-        //   if (otherTouch) { std::swap(size.x, size.y); }
-        // 现在直接用物理方向尺寸计算 touch_scale，横竖屏自动适配
+        // 直接用物理方向尺寸计算 touch_scale，横竖屏自动适配
         touch_scale.x = (float) screenX / size.x;
         touch_scale.y = (float) screenY / size.y;
 
@@ -485,48 +480,40 @@ namespace Touch {
     }
 
     My_Vector2 Touch2Screen(const My_Vector2 &coord) {
-        float x = coord.x, y = coord.y;
-        float xt = x / touch_scale.x;
-        float yt = y / touch_scale.y;
+        // 用归一化坐标 + orientation 做旋转映射，避免 touch_scale 量纲交叉带来的错误。
+        // touch_scale 仍然保留给 Down/Move 写 uinput 用，不在本函数里使用。
+        float absX_max = 1.0f, absY_max = 1.0f;
+        if (!devices.empty()) {
+            absX_max = (float) devices[0].absX.maximum;
+            absY_max = (float) devices[0].absY.maximum;
+            if (absX_max <= 0.0f) absX_max = 1.0f;
+            if (absY_max <= 0.0f) absY_max = 1.0f;
+        }
 
-        if (otherTouch) {
-            switch (orientation) {
-                case 1:
-                    x = xt;
-                    y = yt;
-                    break;
-                case 2:
-                    y = yt;
-                    x = screenSize.y - xt;
-                    break;
-                case 3:
-                    x = screenSize.y - xt;
-                    y = screenSize.x - yt;
-                    break;
-                default:
-                    y = xt;
-                    x = screenSize.y - yt;
-                    break;
-            }
-        } else {
-            switch (orientation) {
-                case 1:
-                    x = yt;
-                    y = screenSize.y - xt;
-                    break;
-                case 2:
-                    x = screenSize.y - xt;
-                    y = screenSize.x - yt;
-                    break;
-                case 3:
-                    y = xt;
-                    x = screenSize.x - yt;
-                    break;
-                default:
-                    x = xt;
-                    y = yt;
-                    break;
-            }
+        const float nx = coord.x / absX_max;   // 归一化触摸 X ∈ [0,1]
+        const float ny = coord.y / absY_max;   // 归一化触摸 Y ∈ [0,1]
+
+        const float W = screenSize.x;          // Surface 逻辑宽
+        const float H = screenSize.y;          // Surface 逻辑高
+
+        float x, y;
+        switch (orientation) {
+            case 1:  // ROT_90
+                x = ny * W;
+                y = (1.0f - nx) * H;
+                break;
+            case 2:  // ROT_180
+                x = (1.0f - nx) * W;
+                y = (1.0f - ny) * H;
+                break;
+            case 3:  // ROT_270
+                x = (1.0f - ny) * W;
+                y = nx * H;
+                break;
+            default: // ROT_0（竖屏）
+                x = nx * W;
+                y = ny * H;
+                break;
         }
         return {x, y};
     }
