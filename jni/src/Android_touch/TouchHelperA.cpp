@@ -283,11 +283,12 @@ namespace Touch {
         devices.clear();
         My_Vector2 size = s;
         readOnly = p_readOnly;
-        if (size.x > size.y) {
-            screenSize = size;
-        } else {
-            screenSize = {size.y, size.x};
-        }
+
+        // [改动 1] 原代码：
+        //   if (size.x > size.y) { screenSize = size; } else { screenSize = {size.y, size.x}; }
+        // 现在直接使用屏幕物理方向尺寸，横竖屏自适应
+        screenSize = size;
+
         DIR *dir = opendir("/dev/input/");
         if (!dir) {
             return false;
@@ -419,12 +420,11 @@ namespace Touch {
             devices[i].S2TY = (float) screenY / (float) devices[i].absY.maximum;
             pthread_create(&t, nullptr, TypeA, (void *) (long) i);
         }
-        if (size.x > size.y) {
-            std::swap(size.x, size.y);
-        }
-        if (otherTouch) {
-            std::swap(size.x, size.y);
-        }
+
+        // [改动 2] 原代码（会在横竖屏切换时错位）：
+        //   if (size.x > size.y) { std::swap(size.x, size.y); }
+        //   if (otherTouch) { std::swap(size.x, size.y); }
+        // 现在直接用物理方向尺寸计算 touch_scale，横竖屏自动适配
         touch_scale.x = (float) screenX / size.x;
         touch_scale.y = (float) screenY / size.y;
 
