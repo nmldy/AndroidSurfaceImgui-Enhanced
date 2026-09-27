@@ -62,32 +62,58 @@ static float        g_hide_progress         = 0.0f;   // 0=完整窗口, 1=胶�
 
 
 // =====================================================================
+//  判断是否横屏（逻辑宽 > 逻辑高）
+// =====================================================================
+static bool IsLandscape() {
+    return native_window_screen_x > native_window_screen_y;
+}
+
+
+// =====================================================================
 //  动态计算展开 / 胶囊 的目标位置与尺寸
-//  关键修复：不再用 short_side/long_side 算，避免横屏时超出屏幕
+//  横竖屏分别适配
 // =====================================================================
 static ImVec2 CalcExpandedSize() {
-    float sx = (float)native_window_screen_x;   // 逻辑宽
-    float sy = (float)native_window_screen_y;   // 逻辑高
-    return ImVec2(sx * 0.92f, sy * 0.75f);
+    float sx = (float)native_window_screen_x;
+    float sy = (float)native_window_screen_y;
+
+    if (IsLandscape()) {
+        // 横屏：宽 78%，高 82%（留出上下空间给上滑动画）
+        return ImVec2(sx * 0.78f, sy * 0.82f);
+    } else {
+        // 竖屏：宽 92%，高 68%（展开窗口比较大方，下面留空间）
+        return ImVec2(sx * 0.92f, sy * 0.68f);
+    }
 }
 
 static ImVec2 CalcExpandedPos(ImVec2 sz) {
     float x = ((float)native_window_screen_x - sz.x) * 0.5f;
-    float y = ((float)native_window_screen_y - sz.y) * 0.5f;
+    // 竖屏 0.55、横屏 0.55 —— 都是居中偏下一点，让上滑距离足够
+    float y = ((float)native_window_screen_y - sz.y) * 0.55f;
     return ImVec2(x, y);
 }
 
 static ImVec2 CalcCapsuleSize() {
     float sx = (float)native_window_screen_x;
-    // 胶囊宽度取屏幕宽的 55%，但不超过 900px（避免横屏时拉太长）
-    float w = sx * 0.55f;
-    if (w > 900.0f) w = 900.0f;
-    return ImVec2(w, 140.0f);
+    float sy = (float)native_window_screen_y;
+
+    if (IsLandscape()) {
+        // 横屏：胶囊相对屏幕更宽（屏幕宽 2400，胶囊约 45%，上限 1200px）
+        float w = sx * 0.45f;
+        if (w > 1200.0f) w = 1200.0f;
+        return ImVec2(w, 140.0f);
+    } else {
+        // 竖屏：胶囊占宽 55%，上限 900px
+        float w = sx * 0.55f;
+        if (w > 900.0f) w = 900.0f;
+        return ImVec2(w, 140.0f);
+    }
 }
 
 static ImVec2 CalcCapsulePos(ImVec2 sz) {
     float x = ((float)native_window_screen_x - sz.x) * 0.5f;
-    float y = 60.0f;   // 顶部留白
+    // 横屏时屏幕高只有 1080，顶部留白小一点
+    float y = IsLandscape() ? 40.0f : 60.0f;
     return ImVec2(x, y);
 }
 
@@ -477,20 +503,94 @@ void Layout_tick_UI(bool *main_thread_flag) {
         static int style_idx = 0;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-        // ===== 计算当前位置和尺寸（展开 <-> 胶囊 之间插值）=====
+        // ============================================================
+        //  两阶段动画：
+        //    阶段 A（progress 0.0 → 0.6）：位置从中央偏下 滑到 屏幕顶
+        //    阶段 B（progress 0.6 → 1.0）：尺寸从大方块 缩成 胶囊
+        // ============================================================
         ImVec2 exp_size = CalcExpandedSize();
         ImVec2 exp_pos  = CalcExpandedPos(exp_size);
         ImVec2 cap_size = CalcCapsuleSize();
         ImVec2 cap_pos  = CalcCapsulePos(cap_size);
 
+        // 阶段 A 进度
+        float move_t = g_hide_progress / 0.6f;
+        if (move_t > 1.0f) move_t = 1.0f;
+
+        // 阶段 B 进度
+        float shrink_t = (g_hide_progress - 0.6f) / 0.4f;
+        if (shrink_t < 0.0f) shrink_t = 0.0f;
+        if (shrink_t > 1.0f) shrink_t = 1.0f;
+
+        // 尺寸：阶段 A 保持展开尺寸，阶段 B 才开始缩
         ImVec2 cur_size = ImVec2(
-            exp_size.x + (cap_size.x - exp_size.x) * g_hide_progress,
-            exp_size.y + (cap_size.y - exp_size.y) * g_hide_progress
+            exp_size.x + (cap_size.x - exp_size.x) * shrink_t,
+            exp_size.y + (cap_size.y - exp_size.y) * shrink_t
         );
-        ImVec2 cur_pos = ImVec2(
-            exp_pos.x + (cap_pos.x - exp_pos.x) * g_hide_progress,
-            exp_pos.y + (cap_pos.y - exp_pos.y) * g_hide_progress
+
+        // 位置：阶段 A 从中央偏下滑到顶部；阶段 B 保持顶部 y，x 随宽度收缩重新居中
+        float pos_y = exp_pos.y + (cap_pos.y - exp_pos.y) * move_t;
+        float cur_x = ((float)native_window_screen_x - cur_size.x) * 0.5f;
+        ImVec2 cur_pos = ImVec2(cur_x, pos_y);
+
+        // ============================================================
+        //  运动模糊：在窗口下方画几条逐渐变淡的胶囊残影
+        // ============================================================
+        if (g_hide_progress > 0.05f && g_hide_progress < 0.95f) {
+            ImDrawList *dl = ImGui::GetForegroundDrawList();
+
+            // 动画速度感：中间段最强
+            float intensity = 1.0f - fabsf(g_hide_progress - 0.5f) * 2.0f;
+            if (intensity < 0.0f) intensity = 0.0f;
+
+            const int TRAIL_COUNT = 6;
+            for (int i = 1; i <= TRAIL_COUNT; ++i) {
+                float t = (float)i / (float)TRAIL_COUNT;
+
+                // 残影向下偏移，模拟"从下方滑上来"的轨迹
+                float trail_offset_y = (float)i * 26.0f;
+
+                // 越远的残影，尺寸越接近展开尺寸
+                float size_lerp = t * 0.35f;
+                ImVec2 trail_size = ImVec2(
+                    cur_size.x + (exp_size.x - cur_size.x) * size_lerp,
+                    cur_size.y + (exp_size.y - cur_size.y) * size_lerp
+                );
+
+                ImVec2 trail_pos = ImVec2(
+                    ((float)native_window_screen_x - trail_size.x) * 0.5f,
+                    cur_pos.y + trail_offset_y
+                );
+
+                // 透明度：越远越淡
+                float alpha = (1.0f - t) * 0.22f * intensity;
+
+                // 圆角 = 高度一半 → 完美胶囊
+                float trail_rounding = trail_size.y * 0.5f;
+
+                dl->AddRectFilled(
+                    trail_pos,
+                    ImVec2(trail_pos.x + trail_size.x, trail_pos.y + trail_size.y),
+                    IM_COL32(70, 130, 220, (int)(alpha * 255)),
+                    trail_rounding
+                );
+            }
+        }
+        // ============================================================
+
+        // ===== 动态圆角：展开 36 → 收起时 = 高度/2（完美胶囊）=====
+        float dyn_rounding = 36.0f + (cap_size.y * 0.5f - 36.0f) * shrink_t;
+
+        // ===== 动态内边距 =====
+        ImVec2 dyn_padding(
+            28.0f + (8.0f - 28.0f) * shrink_t,
+            28.0f + (8.0f - 28.0f) * shrink_t
         );
+
+        // ===== Push 样式 =====
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, dyn_rounding);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, dyn_padding);
 
         ImGui::SetNextWindowPos(cur_pos);
         ImGui::SetNextWindowSize(cur_size);
@@ -502,17 +602,8 @@ void Layout_tick_UI(bool *main_thread_flag) {
                      ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings);
 
-        // ============= 内容：胶囊 vs 完整，按进度切换 =============
-        if (g_hide_progress > 0.15f) {
-            // ---------- 胶囊内容：单行摘要 ----------
-            ImGui::SetCursorPosY((cur_size.y - ImGui::GetTextLineHeight()) * 0.5f);
-            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 24.0f);
-
-            ImGui::Text("%s   %s   %.0f FPS",
-                        ICON_FA_MICROCHIP,
-                        graphics->RenderName,
-                        ImGui::GetIO().Framerate);
-        } else {
+        // ============= 内容：shrink_t >= 0.5 时切成胶囊内容 =============
+        if (shrink_t < 0.5f) {
             // ---------- 完整内容 ----------
             if (::permeate_record_ini) {
                 ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
@@ -520,13 +611,12 @@ void Layout_tick_UI(bool *main_thread_flag) {
                 permeate_record_ini = false;
             }
 
-            // 顶部标题栏
             ImGui::TextDisabled(ICON_FA_MICROCHIP "  %s", graphics->RenderName);
             ImGui::SameLine();
             ImGui::TextDisabled("  ·  " ICON_FA_CODE "  %s", ImGui::GetVersion());
             ImGui::SameLine();
             ImGui::TextDisabled("  ·  " ICON_FA_MOBILE_ALT "  %s",
-                                (native_window_screen_x < native_window_screen_y) ? "竖屏" : "横屏");
+                                IsLandscape() ? "横屏" : "竖屏");
             ImGui::Spacing();
 
             // 分组 1：外观主题
@@ -564,22 +654,18 @@ void Layout_tick_UI(bool *main_thread_flag) {
             // 分组 3：控件测试
             if (ImGui::CollapsingHeader(ICON_FA_SLIDERS_H "  控件测试", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Indent(16.0f);
-
                 ImGui::TextDisabled("滑块");
                 ImGui::SetNextItemWidth(-1.0f);
                 ImGui::SliderFloat("##float_slider", &f, 0.0f, 1.0f, "数值 = %.2f");
-
                 ImGui::TextDisabled("取色器");
                 ImGui::SetNextItemWidth(-1.0f);
                 ImGui::ColorEdit4("##color_picker", (float *) &clear_color);
-
                 ImGui::Spacing();
                 if (ImGui::Button(ICON_FA_PLUS "  点击 +1", ImVec2(0, 0))) {
                     counter++;
                 }
                 ImGui::SameLine();
                 ImGui::Text("计数 = %d", counter);
-
                 ImGui::Unindent(16.0f);
                 ImGui::Spacing();
             }
@@ -598,9 +684,28 @@ void Layout_tick_UI(bool *main_thread_flag) {
             }
 
             g_window = ImGui::GetCurrentWindow();
+
+        } else {
+            // ---------- 胶囊内容：单行摘要，水平 + 垂直居中 ----------
+            float text_h = ImGui::GetTextLineHeight();
+            ImGui::SetCursorPosY((cur_size.y - text_h) * 0.5f);
+
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s   %s   %.0f FPS",
+                     ICON_FA_MICROCHIP,
+                     graphics->RenderName,
+                     ImGui::GetIO().Framerate);
+            float text_w = ImGui::CalcTextSize(buf).x;
+            ImGui::SetCursorPosX((cur_size.x - text_w) * 0.5f);
+
+            ImGui::TextUnformatted(buf);
+
+            g_window = ImGui::GetCurrentWindow();
         }
 
         ImGui::End();
+
+        ImGui::PopStyleVar(3);
     }
 
 
