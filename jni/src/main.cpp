@@ -8,7 +8,7 @@
 // 仅作为文件内静态辅助函数，不改变任何已有函数签名
 // =====================================================================
 static void RebuildSurfaceForDisplayChange() {
-    // 1. 关闭旧渲染上下文（内部会销毁 ImGui 上下文、Vulkan/GL 资源、释放旧 Surface 引用）
+    // 1. 关闭旧渲染上下文（内部会销毁 ImGui 上下文、Vulkan 资源、释放旧 Surface 引用）
     graphics->Shutdown();
     android::ANativeWindowCreator::Destroy(::window);
 
@@ -40,8 +40,8 @@ static void RebuildSurfaceForDisplayChange() {
 int main(int argc, char *argv[]) {
     ::graphics = GraphicsManager::getGraphicsInterface(GraphicsManager::VULKAN);
 
-    //获取屏幕信息    
-    ::screen_config(); 
+    //获取屏幕信息
+    ::screen_config();
 
     // 自动检测：直接使用 displayInfo 已按 orientation 计算好的物理方向尺寸
     // 竖屏手机 -> 1080 x 2400；横屏设备 -> 2400 x 1080
@@ -53,11 +53,11 @@ int main(int argc, char *argv[]) {
 
     ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
     graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-    
+
     Touch::Init({(float)::abs_ScreenX, (float)::abs_ScreenY}, false); //最后一个参数改成true 只监听
     Touch::setOrientation(displayInfo.orientation);
 
-    
+
     ::init_My_drawdata(); //初始化绘制数据
 
     // 记录初始方向 / 尺寸，用于检测运行中的变化
@@ -90,12 +90,12 @@ int main(int argc, char *argv[]) {
             android::ANativeWindowCreator::ProcessMirrorDisplay();
         }
         graphics->NewFrame();
-        
+
         Layout_tick_UI(&flag);
 
-        graphics->EndFrame();        
+        graphics->EndFrame();
     }
-    
+
     // graphics->DeleteTexture(image);
     graphics->Shutdown();
     android::ANativeWindowCreator::Destroy(::window);
