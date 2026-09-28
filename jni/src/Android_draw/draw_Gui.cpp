@@ -59,11 +59,12 @@ static bool IsLandscape() {
     return native_window_screen_x > native_window_screen_y;
 }
 
+// ===== 改动：展开尺寸整体缩小一档 =====
 static ImVec2 CalcDefaultExpandedSize() {
     float sx = (float)native_window_screen_x;
     float sy = (float)native_window_screen_y;
-    if (IsLandscape()) return ImVec2(sx * 0.72f, sy * 0.78f);
-    return ImVec2(sx * 0.86f, sy * 0.62f);
+    if (IsLandscape()) return ImVec2(sx * 0.62f, sy * 0.66f);
+    return ImVec2(sx * 0.78f, sy * 0.52f);
 }
 
 static ImVec2 CalcDefaultExpandedPos(ImVec2 sz) {
@@ -427,12 +428,23 @@ void drawBegin() {
             Touch::setOrientation((int)displayInfo.orientation);
         }
     }
+
+    // ===== 关键修复：在 NewFrame 之前处理"等待抬手指" =====
+    if (g_wait_release) {
+        ImGuiIO &io = ImGui::GetIO();
+        if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2]) {
+            g_wait_release = false;
+        } else {
+            io.MousePos     = ImVec2(-FLT_MAX, -FLT_MAX);
+            io.MousePosPrev = ImVec2(-FLT_MAX, -FLT_MAX);
+            io.MouseDelta   = ImVec2(0.0f, 0.0f);
+            io.MouseDown[0] = false;
+            io.MouseDown[1] = false;
+            io.MouseDown[2] = false;
+        }
+    }
 }
 
-// =====================================================================
-//  主 UI
-//  布局：左侧导航 + 右侧内容
-// =====================================================================
 void Layout_tick_UI(bool *main_thread_flag) {
     if (!g_volume_thread_started) {
         g_volume_thread_started = true;
@@ -449,20 +461,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
     UpdateGlassAnimation();
     UpdateHideAnimation();
-
-    if (g_wait_release) {
-        ImGuiIO &io = ImGui::GetIO();
-        if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2]) {
-            g_wait_release = false;
-        } else {
-            io.MousePos     = ImVec2(-FLT_MAX, -FLT_MAX);
-            io.MousePosPrev = ImVec2(-FLT_MAX, -FLT_MAX);
-            io.MouseDelta   = ImVec2(0.0f, 0.0f);
-            io.MouseDown[0] = false;
-            io.MouseDown[1] = false;
-            io.MouseDown[2] = false;
-        }
-    }
 
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
@@ -488,7 +486,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
         static int style_idx = 0;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-        // 左侧导航当前选中页
         static int g_current_page = 0;
 
         const bool fully_expanded = (!g_ui_hidden && g_hide_progress < 0.01f);
@@ -512,7 +509,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
         float cur_x = ((float)native_window_screen_x - cur_size.x) * 0.5f;
         ImVec2 cur_pos = ImVec2(cur_x, pos_y);
 
-        // 残影
         if (g_hide_progress > 0.05f && g_hide_progress < 0.95f) {
             ImDrawList *dl = ImGui::GetForegroundDrawList();
             float intensity = 1.0f - fabsf(g_hide_progress - 0.5f) * 2.0f;
@@ -571,7 +567,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
         ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag, flags);
 
         if (shrink_t < 0.5f) {
-            // ============ 完整内容 ============
             if (::permeate_record_ini) {
                 if (LastCoordinate.Size_x > 1.0f && LastCoordinate.Size_y > 1.0f) {
                     ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
@@ -580,7 +575,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
                 permeate_record_ini = false;
             }
 
-            // 顶部标题栏
             ImGui::TextDisabled(ICON_FA_MICROCHIP "  %s", graphics->RenderName);
             ImGui::SameLine();
             ImGui::TextDisabled("  ·  " ICON_FA_CODE "  %s", ImGui::GetVersion());
@@ -590,11 +584,8 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImGui::Separator();
             ImGui::Spacing();
 
-            // ============ 左右分栏 ============
-            // 左侧导航宽度按屏幕宽 16% 自适应，限制 160~300px
             const float nav_w = ImClamp((float)native_window_screen_x * 0.16f, 160.0f, 300.0f);
 
-            // 左侧导航
             ImGui::BeginChild("##left_nav", ImVec2(nav_w, 0), false);
             {
                 ImGui::TextDisabled(ICON_FA_LIST "  功能");
@@ -620,7 +611,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
             ImGui::SameLine();
 
-            // 右侧内容
             ImGui::BeginChild("##right_content", ImVec2(0, 0), false);
             {
                 switch (g_current_page) {
@@ -698,7 +688,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             g_window = ImGui::GetCurrentWindow();
 
         } else {
-            // 胶囊内容
             float text_h = ImGui::GetTextLineHeight();
             ImGui::SetCursorPosY((cur_size.y - text_h) * 0.5f);
 
