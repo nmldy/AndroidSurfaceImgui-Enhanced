@@ -5,7 +5,7 @@
 #include "My_font/fontawesome-regular.h"
 #include "My_font/fontawesome-solid.h"
 #include "My_font/gui_icon.h"
-   
+
 #include "My_icon/pic_ZhenAiKun_png.h"
 
 #include <fcntl.h>
@@ -20,12 +20,11 @@ bool permeate_record = false;
 bool permeate_record_ini = false;
 struct Last_ImRect LastCoordinate = {0, 0, 0, 0};
 
-
 std::unique_ptr<AndroidImgui> graphics;
-ANativeWindow *window = NULL; 
-android::ANativeWindowCreator::DisplayInfo displayInfo;// 屏幕信息
-ImGuiWindow *g_window = NULL;// 窗口信息
-int abs_ScreenX = 0, abs_ScreenY = 0;// 绝对屏幕X _ Y
+ANativeWindow *window = NULL;
+android::ANativeWindowCreator::DisplayInfo displayInfo;
+ImGuiWindow *g_window = NULL;
+int abs_ScreenX = 0, abs_ScreenY = 0;
 int native_window_screen_x = 0, native_window_screen_y = 0;
 
 TextureInfo Aekun_image{};
@@ -35,26 +34,15 @@ ImFont* icon_font_0 = NULL;
 ImFont* icon_font_1 = NULL;
 ImFont* icon_font_2 = NULL;
 
-
 static bool g_need_reset_interaction = false;
-
-// 等待抬手指标志：重建 / 切方向后进入冻结状态
 static bool g_wait_release = false;
 
-
-// =====================================================================
-//  用户当前的展开态位置尺寸（用户可以拖拽修改，动画以它为起点）
-//  - g_user_exp_size.x < 0 表示"尚未初始化"，会用公式重算
-//  - g_user_exp_placed 表示是否已经把位置尺寸应用给 ImGui 一次
-// =====================================================================
+// 用户展开态位置尺寸
 static ImVec2 g_user_exp_pos  = ImVec2(-1.0f, -1.0f);
 static ImVec2 g_user_exp_size = ImVec2(-1.0f, -1.0f);
 static bool   g_user_exp_placed = false;
 
-
-// =====================================================================
-//  UI 动画状态
-// =====================================================================
+// UI 动画状态
 struct GlassAnimState {
     float  alpha          = 0.0f;
     float  target_alpha   = 0.98f;
@@ -64,36 +52,21 @@ struct GlassAnimState {
 };
 static GlassAnimState g_anim;
 
-
-// =====================================================================
-//  音量键隐藏 / 展开 状态
-// =====================================================================
+// 音量键
 static volatile int g_volume_toggle_request = 0;
 static bool         g_volume_thread_started = false;
 static bool         g_ui_hidden             = false;
 static float        g_hide_progress         = 0.0f;
 
-
-// =====================================================================
-//  判断是否横屏
-// =====================================================================
 static bool IsLandscape() {
     return native_window_screen_x > native_window_screen_y;
 }
 
-
-// =====================================================================
-//  公式算出的默认展开态位置尺寸（仅在 g_user_exp_size 未初始化时使用）
-// =====================================================================
 static ImVec2 CalcDefaultExpandedSize() {
     float sx = (float)native_window_screen_x;
     float sy = (float)native_window_screen_y;
-
-    if (IsLandscape()) {
-        return ImVec2(sx * 0.72f, sy * 0.78f);
-    } else {
-        return ImVec2(sx * 0.86f, sy * 0.62f);
-    }
+    if (IsLandscape()) return ImVec2(sx * 0.72f, sy * 0.78f);
+    return ImVec2(sx * 0.86f, sy * 0.62f);
 }
 
 static ImVec2 CalcDefaultExpandedPos(ImVec2 sz) {
@@ -104,16 +77,14 @@ static ImVec2 CalcDefaultExpandedPos(ImVec2 sz) {
 
 static ImVec2 CalcCapsuleSize() {
     float sx = (float)native_window_screen_x;
-
     if (IsLandscape()) {
         float w = sx * 0.45f;
         if (w > 1200.0f) w = 1200.0f;
         return ImVec2(w, 140.0f);
-    } else {
-        float w = sx * 0.55f;
-        if (w > 900.0f) w = 900.0f;
-        return ImVec2(w, 140.0f);
     }
+    float w = sx * 0.55f;
+    if (w > 900.0f) w = 900.0f;
+    return ImVec2(w, 140.0f);
 }
 
 static ImVec2 CalcCapsulePos(ImVec2 sz) {
@@ -122,45 +93,31 @@ static ImVec2 CalcCapsulePos(ImVec2 sz) {
     return ImVec2(x, y);
 }
 
-// 重置用户展开态：下次 Layout 会用公式重算
 static void ResetUserExpandedState() {
     g_user_exp_size   = ImVec2(-1.0f, -1.0f);
     g_user_exp_pos    = ImVec2(-1.0f, -1.0f);
     g_user_exp_placed = false;
 }
 
-
-// =====================================================================
-//  音量键监听线程
-// =====================================================================
+// 音量键监听线程
 static void* VolumeKeyThread(void*) {
     std::vector<int> fds;
-
     for (int i = 0; i < 32; ++i) {
         char path[64];
         snprintf(path, sizeof(path), "/dev/input/event%d", i);
-
         int fd = open(path, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
-
         uint8_t keybit[(KEY_MAX / 8) + 1] = {0};
         if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit) < 0) {
             close(fd);
             continue;
         }
-
         bool has_vol_up = keybit[KEY_VOLUMEUP   / 8] & (1 << (KEY_VOLUMEUP   % 8));
         bool has_vol_dn = keybit[KEY_VOLUMEDOWN / 8] & (1 << (KEY_VOLUMEDOWN % 8));
-
-        if (has_vol_up || has_vol_dn) {
-            fds.push_back(fd);
-        } else {
-            close(fd);
-        }
+        if (has_vol_up || has_vol_dn) fds.push_back(fd);
+        else close(fd);
     }
-
     if (fds.empty()) return nullptr;
-
     while (true) {
         for (int fd : fds) {
             struct input_event ev;
@@ -177,59 +134,39 @@ static void* VolumeKeyThread(void*) {
     return nullptr;
 }
 
-
-// =====================================================================
-//  隐藏 / 展开 动画更新
-// =====================================================================
 static void UpdateHideAnimation() {
     ImGuiIO &io = ImGui::GetIO();
     float dt = io.DeltaTime;
     if (dt <= 0.0f || dt > 0.1f) dt = 1.0f / 60.0f;
-
     const float target = g_ui_hidden ? 1.0f : 0.0f;
-    const float k = 6.0f;   // 约 0.5s，能看清伸缩过程
+    const float k = 6.0f;
     float t = 1.0f - expf(-k * dt);
     if (t > 1.0f) t = 1.0f;
-
     g_hide_progress += (target - g_hide_progress) * t;
-    if (fabsf(g_hide_progress - target) < 0.0015f)
-        g_hide_progress = target;
+    if (fabsf(g_hide_progress - target) < 0.0015f) g_hide_progress = target;
 }
 
-
-// =====================================================================
-//  重建 / 切屏后给新上下文一个中性的鼠标初始状态
-// =====================================================================
 static void ResetMouseToNeutralPosition() {
-    if (ImGui::GetCurrentContext() == nullptr)
-        return;
-
+    if (ImGui::GetCurrentContext() == nullptr) return;
     ImGuiIO &io = ImGui::GetIO();
-
     io.MousePos     = ImVec2(-FLT_MAX, -FLT_MAX);
     io.MousePosPrev = ImVec2(-FLT_MAX, -FLT_MAX);
     io.MouseDelta   = ImVec2(0.0f, 0.0f);
     io.MouseDown[0] = false;
     io.MouseDown[1] = false;
     io.MouseDown[2] = false;
-
     g_wait_release = true;
 }
 
-
 static void CaptureCurrentColorsAsTarget() {
     ImGuiStyle &style = ImGui::GetStyle();
-    for (int i = 0; i < ImGuiCol_COUNT; ++i) {
-        g_anim.colors_target[i] = style.Colors[i];
-    }
+    for (int i = 0; i < ImGuiCol_COUNT; ++i) g_anim.colors_target[i] = style.Colors[i];
 }
-
 
 static void ResetGlassFadeIn() {
     g_anim.alpha = 0.0f;
     g_anim.colors_inited = false;
 }
-
 
 static void UpdateGlassAnimation() {
     ImGuiIO &io = ImGui::GetIO();
@@ -243,37 +180,26 @@ static void UpdateGlassAnimation() {
     }
 
     if (!g_anim.colors_inited) {
-        for (int i = 0; i < ImGuiCol_COUNT; ++i) {
-            g_anim.colors_current[i] = g_anim.colors_target[i];
-        }
+        for (int i = 0; i < ImGuiCol_COUNT; ++i) g_anim.colors_current[i] = g_anim.colors_target[i];
         g_anim.colors_inited = true;
     } else {
         const float k = 9.0f;
         float t = 1.0f - expf(-k * dt);
         if (t > 1.0f) t = 1.0f;
-
         ImGuiStyle &style = ImGui::GetStyle();
         for (int i = 0; i < ImGuiCol_COUNT; ++i) {
             ImVec4 &cur       = g_anim.colors_current[i];
             const ImVec4 &tgt = g_anim.colors_target[i];
-
             cur.x += (tgt.x - cur.x) * t;
             cur.y += (tgt.y - cur.y) * t;
             cur.z += (tgt.z - cur.z) * t;
             cur.w += (tgt.w - cur.w) * t;
-
             style.Colors[i] = cur;
         }
     }
-
     ImGui::GetStyle().Alpha = g_anim.alpha;
 }
 
-
-// =====================================================================
-//  样式与配色
-//  注意：不再用 ScaleAllSizes(3.25)，改绝对值，避免控件被撑得很大
-// =====================================================================
 static void ApplyLiquidGlassShapeAndSpacing() {
     ImGuiStyle &style = ImGui::GetStyle();
     style = ImGuiStyle();
@@ -302,7 +228,6 @@ static void ApplyLiquidGlassShapeAndSpacing() {
     style.AntiAliasedFill  = true;
 }
 
-
 static void ApplyLiquidGlassDarkColors() {
     ImGuiStyle &style = ImGui::GetStyle();
     ImVec4 *c = style.Colors;
@@ -310,18 +235,14 @@ static void ApplyLiquidGlassDarkColors() {
     c[ImGuiCol_WindowBg]       = ImVec4(0.05f, 0.06f, 0.10f, 0.45f);
     c[ImGuiCol_ChildBg]        = ImVec4(0.08f, 0.09f, 0.14f, 0.35f);
     c[ImGuiCol_PopupBg]        = ImVec4(0.05f, 0.06f, 0.10f, 0.55f);
-
     c[ImGuiCol_Border]         = ImVec4(1.00f, 1.00f, 1.00f, 0.28f);
     c[ImGuiCol_BorderShadow]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-
     c[ImGuiCol_TitleBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
     c[ImGuiCol_TitleBgActive]    = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_TitleBgCollapsed] = ImVec4(1.00f, 1.00f, 1.00f, 0.06f);
-
     c[ImGuiCol_FrameBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_FrameBgHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.16f);
     c[ImGuiCol_FrameBgActive]  = ImVec4(1.00f, 1.00f, 1.00f, 0.22f);
-
     c[ImGuiCol_Button]         = ImVec4(1.00f, 1.00f, 1.00f, 0.12f);
     c[ImGuiCol_ButtonHovered]  = ImVec4(1.00f, 1.00f, 1.00f, 0.20f);
     c[ImGuiCol_ButtonActive]   = ImVec4(1.00f, 1.00f, 1.00f, 0.28f);
@@ -333,14 +254,11 @@ static void ApplyLiquidGlassDarkColors() {
     c[ImGuiCol_Header]           = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_HeaderHovered]    = ImVec4(1.00f, 1.00f, 1.00f, 0.18f);
     c[ImGuiCol_HeaderActive]     = ImVec4(1.00f, 1.00f, 1.00f, 0.26f);
-
     c[ImGuiCol_Text]         = ImVec4(0.98f, 0.99f, 1.00f, 1.00f);
     c[ImGuiCol_TextDisabled] = ImVec4(0.75f, 0.78f, 0.85f, 0.75f);
-
     c[ImGuiCol_Separator]        = ImVec4(1.00f, 1.00f, 1.00f, 0.12f);
     c[ImGuiCol_SeparatorHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.24f);
     c[ImGuiCol_SeparatorActive]  = glow;
-
     c[ImGuiCol_ScrollbarBg]          = ImVec4(1.00f, 1.00f, 1.00f, 0.04f);
     c[ImGuiCol_ScrollbarGrab]        = ImVec4(1.00f, 1.00f, 1.00f, 0.22f);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.34f);
@@ -350,7 +268,6 @@ static void ApplyLiquidGlassDarkColors() {
     c[ImGuiCol_ResizeGripActive]     = glow;
 }
 
-
 static void ApplyLiquidGlassLightColors() {
     ImGuiStyle &style = ImGui::GetStyle();
     ImVec4 *c = style.Colors;
@@ -358,18 +275,14 @@ static void ApplyLiquidGlassLightColors() {
     c[ImGuiCol_WindowBg]       = ImVec4(0.98f, 0.98f, 1.00f, 0.55f);
     c[ImGuiCol_ChildBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.40f);
     c[ImGuiCol_PopupBg]        = ImVec4(0.99f, 0.99f, 1.00f, 0.65f);
-
     c[ImGuiCol_Border]         = ImVec4(0.60f, 0.65f, 0.80f, 0.35f);
     c[ImGuiCol_BorderShadow]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-
     c[ImGuiCol_TitleBg]          = ImVec4(0.90f, 0.92f, 0.98f, 0.30f);
     c[ImGuiCol_TitleBgActive]    = ImVec4(0.85f, 0.90f, 0.98f, 0.45f);
     c[ImGuiCol_TitleBgCollapsed] = ImVec4(0.90f, 0.92f, 0.98f, 0.30f);
-
     c[ImGuiCol_FrameBg]        = ImVec4(1.00f, 1.00f, 1.00f, 0.55f);
     c[ImGuiCol_FrameBgHovered] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
     c[ImGuiCol_FrameBgActive]  = ImVec4(1.00f, 1.00f, 1.00f, 0.85f);
-
     c[ImGuiCol_Button]         = ImVec4(0.92f, 0.94f, 1.00f, 0.70f);
     c[ImGuiCol_ButtonHovered]  = ImVec4(0.85f, 0.90f, 1.00f, 0.85f);
     c[ImGuiCol_ButtonActive]   = ImVec4(0.78f, 0.86f, 1.00f, 0.95f);
@@ -381,14 +294,11 @@ static void ApplyLiquidGlassLightColors() {
     c[ImGuiCol_Header]           = ImVec4(0.85f, 0.90f, 1.00f, 0.60f);
     c[ImGuiCol_HeaderHovered]    = ImVec4(0.78f, 0.86f, 1.00f, 0.80f);
     c[ImGuiCol_HeaderActive]     = ImVec4(0.70f, 0.80f, 1.00f, 0.90f);
-
     c[ImGuiCol_Text]         = ImVec4(0.10f, 0.12f, 0.18f, 1.00f);
     c[ImGuiCol_TextDisabled] = ImVec4(0.40f, 0.44f, 0.52f, 0.75f);
-
     c[ImGuiCol_Separator]        = ImVec4(0.60f, 0.65f, 0.80f, 0.30f);
     c[ImGuiCol_SeparatorHovered] = ImVec4(0.50f, 0.58f, 0.78f, 0.50f);
     c[ImGuiCol_SeparatorActive]  = accent;
-
     c[ImGuiCol_ScrollbarBg]          = ImVec4(0.90f, 0.92f, 0.98f, 0.20f);
     c[ImGuiCol_ScrollbarGrab]        = ImVec4(0.70f, 0.75f, 0.85f, 0.55f);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.68f, 0.82f, 0.75f);
@@ -397,7 +307,6 @@ static void ApplyLiquidGlassLightColors() {
     c[ImGuiCol_ResizeGripHovered]    = ImVec4(0.50f, 0.58f, 0.78f, 0.55f);
     c[ImGuiCol_ResizeGripActive]     = accent;
 }
-
 
 static void ApplyLiquidGlassWindowStyle() {
     ApplyLiquidGlassShapeAndSpacing();
@@ -410,7 +319,6 @@ static void ApplyLiquidGlassLightStyle() {
     ApplyLiquidGlassLightColors();
     CaptureCurrentColorsAsTarget();
 }
-
 
 bool M_Android_LoadFont(float SizePixels) {
     ImGuiIO &io = ImGui::GetIO();
@@ -443,54 +351,102 @@ void init_My_drawdata() {
     g_ui_hidden     = false;
     g_hide_progress = 0.0f;
 
-    // 重建后让用户展开态重新计算
     ResetUserExpandedState();
 }
-
 
 void screen_config() {
     ::displayInfo = android::ANativeWindowCreator::GetDisplayInfo();
 }
 
+// =====================================================================
+//  重建 Surface / ImGui / Touch —— 用于中途切换横竖屏
+// =====================================================================
+static void RebuildForOrientation() {
+    // 1) 保存当前窗口位置尺寸（供下次展开态公式使用；或直接丢弃）
+    if (g_window != nullptr) {
+        LastCoordinate.Pos_x = g_window->Pos.x;
+        LastCoordinate.Pos_y = g_window->Pos.y;
+        LastCoordinate.Size_x = g_window->Size.x;
+        LastCoordinate.Size_y = g_window->Size.y;
+    }
+
+    // 2) 关闭旧渲染
+    graphics->Shutdown();
+    android::ANativeWindowCreator::Destroy(::window);
+
+    // 3) 用新方向的物理尺寸重建
+    native_window_screen_x = displayInfo.width;
+    native_window_screen_y = displayInfo.height;
+    abs_ScreenX = displayInfo.width;
+    abs_ScreenY = displayInfo.height;
+
+    ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
+    graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
+
+    // 4) 重建 ImGui 资源（字体会重新加载，样式重应用）
+    ::init_My_drawdata();
+
+    // 5) 重建 Touch 坐标系
+    Touch::Close();
+    Touch::Init({(float)abs_ScreenX, (float)abs_ScreenY}, false);
+    Touch::setOrientation((int)displayInfo.orientation);
+
+    // 6) 清理交互状态
+    g_window = NULL;
+    ResetMouseToNeutralPosition();
+    g_need_reset_interaction = true;
+
+    ResetGlassFadeIn();
+    g_ui_hidden     = false;
+    g_hide_progress = 0.0f;
+
+    ResetUserExpandedState();
+}
+
 void drawBegin() {
     if (::permeate_record_ini) {
-        LastCoordinate.Pos_x = ::g_window->Pos.x;
-        LastCoordinate.Pos_y = ::g_window->Pos.y;
-        LastCoordinate.Size_x = ::g_window->Size.x;
-        LastCoordinate.Size_y = ::g_window->Size.y;
+        if (g_window != nullptr) {
+            LastCoordinate.Pos_x = ::g_window->Pos.x;
+            LastCoordinate.Pos_y = ::g_window->Pos.y;
+            LastCoordinate.Size_x = ::g_window->Size.x;
+            LastCoordinate.Size_y = ::g_window->Size.y;
+        } else {
+            LastCoordinate = {0, 0, 0, 0};
+        }
 
         graphics->Shutdown();
         android::ANativeWindowCreator::Destroy(::window);
         ::window = android::ANativeWindowCreator::Create("AImGui", native_window_screen_x, native_window_screen_y, permeate_record);
         graphics->Init_Render(::window, native_window_screen_x, native_window_screen_y);
-        ::init_My_drawdata();   // 内部会 ResetUserExpandedState
+        ::init_My_drawdata();
 
         g_window = NULL;
         ResetMouseToNeutralPosition();
         g_need_reset_interaction = true;
     }
 
-
+    // ===== 方向变化检测：中途旋转也重建 Surface =====
     static uint32_t orientation = -1;
     screen_config();
     if (orientation != displayInfo.orientation) {
         orientation = displayInfo.orientation;
-        Touch::setOrientation((int)displayInfo.orientation);
-        ResetMouseToNeutralPosition();
-        g_need_reset_interaction = true;
 
-        ResetGlassFadeIn();
-        g_ui_hidden     = false;
-        g_hide_progress = 0.0f;
+        // 首次进入这里（orientation 初值 -1）时，如果 displayInfo 的尺寸
+        // 和当前 native_window_screen_* 一致，就不需要重建
+        const bool size_changed =
+            (displayInfo.width  != native_window_screen_x) ||
+            (displayInfo.height != native_window_screen_y);
 
-        // 方向切换也重算展开态
-        ResetUserExpandedState();
+        if (size_changed) {
+            RebuildForOrientation();
+        } else {
+            // 尺寸没变，只更新 Touch 朝向
+            Touch::setOrientation((int)displayInfo.orientation);
+        }
     }
 }
 
-
 void Layout_tick_UI(bool *main_thread_flag) {
-    // ===== 启动音量键线程（只启动一次）=====
     if (!g_volume_thread_started) {
         g_volume_thread_started = true;
         pthread_t t;
@@ -499,16 +455,15 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // ===== 处理音量键：切换隐藏 / 展开 =====
-    if (__sync_lock_test_and_set(&g_volume_toggle_request, 0) > 0) {
+    // 音量键切换（支持连按）
+    int volume_presses = __sync_lock_test_and_set(&g_volume_toggle_request, 0);
+    while (volume_presses-- > 0) {
         g_ui_hidden = !g_ui_hidden;
     }
 
-    // ===== 每帧驱动动画 =====
     UpdateGlassAnimation();
     UpdateHideAnimation();
 
-    // ===== 等待抬手指：重建 / 切方向后的第一次触摸防误判 =====
     if (g_wait_release) {
         ImGuiIO &io = ImGui::GetIO();
         if (!io.MouseDown[0] && !io.MouseDown[1] && !io.MouseDown[2]) {
@@ -522,7 +477,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             io.MouseDown[2] = false;
         }
     }
-    // ============================================================
 
     if (g_need_reset_interaction) {
         g_need_reset_interaction = false;
@@ -532,13 +486,11 @@ void Layout_tick_UI(bool *main_thread_flag) {
         }
     }
 
-    // ===== 展开态尺寸如果还没算过，用公式算一次 =====
     if (g_user_exp_size.x < 0.0f) {
         g_user_exp_size   = CalcDefaultExpandedSize();
         g_user_exp_pos    = CalcDefaultExpandedPos(g_user_exp_size);
         g_user_exp_placed = false;
     }
-    // ============================================================
 
     static bool show_draw_Line = false;
     static bool show_demo_window = false;
@@ -550,14 +502,11 @@ void Layout_tick_UI(bool *main_thread_flag) {
         static int style_idx = 0;
         static ImVec4 clear_color = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-        // 是否处于"完全展开"的静止状态
         const bool fully_expanded = (!g_ui_hidden && g_hide_progress < 0.01f);
 
-        // 胶囊态
         ImVec2 cap_size = CalcCapsuleSize();
         ImVec2 cap_pos  = CalcCapsulePos(cap_size);
 
-        // 两阶段进度
         float move_t = g_hide_progress / 0.6f;
         if (move_t > 1.0f) move_t = 1.0f;
 
@@ -565,23 +514,18 @@ void Layout_tick_UI(bool *main_thread_flag) {
         if (shrink_t < 0.0f) shrink_t = 0.0f;
         if (shrink_t > 1.0f) shrink_t = 1.0f;
 
-        // 当前尺寸：从"用户展开态尺寸"向胶囊尺寸插值
         ImVec2 cur_size = ImVec2(
             g_user_exp_size.x + (cap_size.x - g_user_exp_size.x) * shrink_t,
             g_user_exp_size.y + (cap_size.y - g_user_exp_size.y) * shrink_t
         );
 
-        // 当前位置：y 从"用户展开态 y"向"胶囊 y"插值，x 始终水平居中
         float pos_y = g_user_exp_pos.y + (cap_pos.y - g_user_exp_pos.y) * move_t;
         float cur_x = ((float)native_window_screen_x - cur_size.x) * 0.5f;
         ImVec2 cur_pos = ImVec2(cur_x, pos_y);
 
-        // ============================================================
-        //  运动模糊残影
-        // ============================================================
+        // 运动模糊残影
         if (g_hide_progress > 0.05f && g_hide_progress < 0.95f) {
             ImDrawList *dl = ImGui::GetForegroundDrawList();
-
             float intensity = 1.0f - fabsf(g_hide_progress - 0.5f) * 2.0f;
             if (intensity < 0.0f) intensity = 0.0f;
 
@@ -609,20 +553,13 @@ void Layout_tick_UI(bool *main_thread_flag) {
                 );
             }
         }
-        // ============================================================
 
-        // 动态圆角 / 内边距
         float dyn_rounding = 22.0f + (cap_size.y * 0.5f - 22.0f) * shrink_t;
         ImVec2 dyn_padding(
             16.0f + (8.0f - 16.0f) * shrink_t,
             16.0f + (8.0f - 16.0f) * shrink_t
         );
 
-        // ============================================================
-        //  位置尺寸的应用策略：
-        //    完全展开 → 只在首次应用一次，之后让 ImGui 保留用户拖拽的结果
-        //    动画中 / 已收起 → 每帧强制
-        // ============================================================
         if (!fully_expanded || !g_user_exp_placed) {
             ImGui::SetNextWindowPos(cur_pos);
             ImGui::SetNextWindowSize(cur_size);
@@ -638,19 +575,19 @@ void Layout_tick_UI(bool *main_thread_flag) {
             ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoSavedSettings;
 
-        // 只有动画中 / 已收起时才禁用用户的拖拽
         if (!fully_expanded) {
             flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
         }
 
         ImGui::Begin("AndroidSurfaceImguiEnhanced", main_thread_flag, flags);
-        // ============================================================
 
         if (shrink_t < 0.5f) {
-            // ---------- 完整内容 ----------
+            // 完整内容
             if (::permeate_record_ini) {
-                ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
-                ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
+                if (LastCoordinate.Size_x > 1.0f && LastCoordinate.Size_y > 1.0f) {
+                    ImGui::SetWindowPos({LastCoordinate.Pos_x, LastCoordinate.Pos_y});
+                    ImGui::SetWindowSize({LastCoordinate.Size_x, LastCoordinate.Size_y});
+                }
                 permeate_record_ini = false;
             }
 
@@ -713,10 +650,11 @@ void Layout_tick_UI(bool *main_thread_flag) {
             if (ImGui::CollapsingHeader(ICON_FA_INFO_CIRCLE "  运行状态", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::Indent(12.0f);
                 ImGui::Text("窗口集中 = %d", ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow));
+                const float fps = ImGui::GetIO().Framerate;
+                const float ms_per_frame = (fps > 0.0f) ? (1000.0f / fps) : 0.0f;
                 ImGui::TextColored(ImVec4(0.45f, 0.75f, 1.0f, 1.0f),
                                    ICON_FA_TACHOMETER_ALT "  %.1f FPS   (%.3f ms/frame)",
-                                   ImGui::GetIO().Framerate,
-                                   1000.0f / ImGui::GetIO().Framerate);
+                                   fps, ms_per_frame);
                 ImGui::TextDisabled(ICON_FA_VOLUME_UP " 音量上/下 : 收起 / 展开");
                 ImGui::Unindent(12.0f);
                 ImGui::Spacing();
@@ -725,7 +663,7 @@ void Layout_tick_UI(bool *main_thread_flag) {
             g_window = ImGui::GetCurrentWindow();
 
         } else {
-            // ---------- 胶囊内容 ----------
+            // 胶囊内容
             float text_h = ImGui::GetTextLineHeight();
             ImGui::SetCursorPosY((cur_size.y - text_h) * 0.5f);
 
@@ -742,7 +680,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
             g_window = ImGui::GetCurrentWindow();
         }
 
-        // 完全展开时：读回 ImGui 当前的实际位置尺寸（用户可能拖拽过）
         if (fully_expanded) {
             g_user_exp_pos  = ImGui::GetWindowPos();
             g_user_exp_size = ImGui::GetWindowSize();
@@ -753,7 +690,6 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
         ImGui::PopStyleVar(3);
     }
-
 
     if (show_another_window) {
         ImGui::Begin(ICON_FA_CAT "  另一个窗口", &show_another_window);
@@ -771,5 +707,4 @@ void Layout_tick_UI(bool *main_thread_flag) {
 
     if (show_draw_Line)
         ImGui::GetForegroundDrawList()->AddLine(ImVec2(0, 0), ImVec2(displayInfo.width, displayInfo.height), IM_COL32(255, 0, 0, 255), 4);
-
 }
